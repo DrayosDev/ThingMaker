@@ -11,6 +11,7 @@ import { create } from "zustand";
 import { listen } from "@tauri-apps/api/event";
 import type {
   AmendmentRecord,
+  ContinuityArchive,
   DiffScope,
   NewAmendment,
   AttachmentSnapshot,
@@ -57,6 +58,7 @@ import { isLocalChat } from "./localModels";
 import { HANDOFF_SPLIT, handoffBrief, hasConversation, helperPresetFrom, readHelperPresets, readPresets, upsertHelperPreset, upsertJob, upsertPreset, withoutHandoff, type HelperPreset } from "./team";
 import { copiesItself, forkBranch, forkTitle, type ForkPoint } from "./fork";
 import { sessionUsesActiveAccount } from "./quotaRecovery";
+import { continuityBrief, continuityMarkdown } from "./continuity";
 
 /** Preference keys (scope `ui`) for saved teams. */
 const TEAM_PRESETS_KEY = "teamPresets";
@@ -147,7 +149,7 @@ export type View =
   | { kind: "teams" };
 
 /** Settings' tabs, in bar order. Integrations is one of them (⌘I). */
-export type SettingsTab = "general" | "chat" | "models" | "notifications" | "integrations" | "phone" | "data";
+export type SettingsTab = "general" | "chat" | "continuity" | "models" | "notifications" | "integrations" | "phone" | "data";
 
 export type SessionTab = "transcript" | "files" | "changes" | "terminal" | "agents" | "context" | "artifacts" | "images" | "odyssey" | "ultrareview";
 
@@ -372,6 +374,7 @@ type State = {
   loadUiPrefs: () => Promise<void>;
   setUiPrefs: (patch: Partial<UiPrefs>) => Promise<void>;
   exportTranscript: (sessionId: string) => Promise<void>;
+  exportContinuity: (sessionId: string) => Promise<void>;
   loadSettings: () => Promise<void>;
   saveSettings: (settings: NotificationSettings) => Promise<void>;
   testNotification: () => Promise<void>;
@@ -658,20 +661,139 @@ export type PendingProvider = { resources?: WorkerSlot["resources"]; provider: P
 export type ForkSource = { workspaceId: string; agentSessionId: string; provider: Provider; key?: string };
 
 /** A session that carries on another's conversation on a different provider. */
-export type Continuation = { fromAgentSessionId: string; fromProvider: Provider; pendingBrief?: string };
+export type Continuation = { fromAgentSessionId: string; fromProvider: Provider; pendingBrief?: string; archive?: ContinuityArchive; target?: { workspaceId: string; provider: Provider; accountId: string } };
+
+/** A durable id can coincide across accounts/providers. Never inject another
+ * account's pending text or show its private archive location. */
+export function sessionContinuation(session: LiveSession | undefined, continuations: Record<string, Continuation>): Continuation | undefined {
+  const entry = session?.snapshot.agentSessionId ? continuations[session.snapshot.agentSessionId] : undefined;
+  if (!entry || !session) return undefined;
+  // Older records have no trustworthy account/workspace provenance. A link
+  // without private context is safe to keep; pending text needs a fresh handoff.
+  if (!entry.target) return entry.archive || entry.pendingBrief ? undefined : entry;
+  return entry.target.workspaceId === session.workspaceId && entry.target.provider === session.snapshot.provider
+    && entry.target.accountId === (session.snapshot.accountId ?? "default") ? entry : undefined;
+}
+
+function continuationTarget(session: LiveSession) {
+  return { workspaceId: session.workspaceId, provider: session.snapshot.provider, accountId: session.snapshot.accountId ?? "default" };
+}
 
 const CONTINUATIONS_KEY = "session_continuations";
 const quotaContinuationSessions = new Set<string>();
 const quotaContinuationProviders = new Set<Provider>();
+const leaderContinuations = new Set<string>();
+let continuationWrites: Promise<unknown> = Promise.resolve();
+
+function saveContinuation(get: Get, set: Set, agent: string, entry: Continuation): Promise<void> {
+  const write = continuationWrites.catch(() => undefined).then(async () => {
+    await api.prefSet(CONTINUATIONS_KEY, { ...get().continuations, [agent]: entry });
+    set({ continuations: { ...get().continuations, [agent]: entry } });
+  });
+  continuationWrites = write;
+  return write;
+}
+
+/** Freeze the exposed conversation, then recover retained events still waiting
+ * for the renderer. Never put drafts or queued prompts in the archive. */
+async function saveContinuity(get: Get, session: LiveSession): Promise<{ archive: ContinuityArchive; sequence: string }> {
+  const projection = structuredClone(session.projection);
+  const snapshot = await api.sessionSnapshot(session.handle);
+  if (!snapshot.agentSessionId || snapshot.agentSessionId !== session.snapshot.agentSessionId) throw new Error("Cannot read continuity state without a stable native session ID.");
+  const [jobs, goal] = await Promise.all([
+    api.delegationJobs(session.handle),
+    api.odysseyForSession(session.workspaceId, snapshot.agentSessionId),
+  ]);
+  if (BigInt(snapshot.lastSequence) > BigInt(projection.lastSequence)) {
+    const events = await api.sessionHistory(session.handle, projection.lastSequence);
+    for (const event of events) {
+      if (BigInt(event.sequence) > BigInt(snapshot.lastSequence)) break;
+      if (BigInt(event.sequence) > BigInt(projection.lastSequence)) applyEvent(projection, event);
+    }
+  }
+  const workspace = get().workspaces.find((entry) => entry.id === session.workspaceId);
+  const warnings: string[] = [];
+  if (snapshot.historyDropped > 0) warnings.push(`The native replay buffer has dropped ${snapshot.historyDropped} earlier events. Visible history already cached by ThingMaker is included, but earlier unavailable content cannot be recovered or guaranteed complete.`);
+  if (projection.snapshotNeeded) warnings.push("The conversation cache reported a history gap; some earlier content may be unavailable.");
+  if (BigInt(projection.lastSequence) < BigInt(snapshot.lastSequence)) warnings.push("Some events up to the snapshot were unavailable for replay. This document may be incomplete.");
+  const markdown = continuityMarkdown({
+    title: sessionTitle(session), provider: snapshot.provider, agentSessionId: snapshot.agentSessionId,
+    workspacePath: workspace?.displayPath ?? workspace?.canonicalRoot ?? session.workspaceId,
+    projection, ...(get().teams[session.handle.id] ? { team: get().teams[session.handle.id]! } : {}), goal, jobs,
+  });
+  const archive = await api.continuitySave(session.handle, warnings.length ? `> Context availability warnings\n> ${warnings.join("\n> ")}\n\n${markdown}` : markdown);
+  return { archive, sequence: snapshot.lastSequence };
+}
+
+async function leaderBrief(get: Get, session: LiveSession, budget = 6000): Promise<{ brief: string; archive?: ContinuityArchive; sequence?: string }> {
+  const excerpt = get().sideBrief[session.handle.id] ?? handoffBrief(session.projection.cards, session.snapshot.provider, budget);
+  if (get().uiPrefs.autoContinuity === false) return { brief: excerpt };
+  const { archive, sequence } = await saveContinuity(get, session);
+  return { brief: continuityBrief(excerpt, archive), archive, sequence };
+}
+
+function requireContinuityReader(snapshot: Snapshot) {
+  if (isLocalChat(snapshot)) throw { code: "UNSUPPORTED", message: t("Automatic continuity needs an agent with tools. Choose a local agent, or turn off automatic continuity in Settings to continue with a limited excerpt in Local Chat."), retry: "user_action" };
+}
+
+function idleHandoffSource(get: Get, sessionId: string): LiveSession {
+  const source = get().sessions[sessionId];
+  if (!source || source.projection.attachment !== "attached" || source.projection.process === "exited") throw { code: "NOT_READY", message: t("The source session changed while the continuation was opening. Try again."), retry: "user_action" };
+  const p = source.projection;
+  if (source.inFlightRequestId || source.pendingPrompt || source.steerInFlight
+    || ["running", "awaiting_user", "cancelling"].includes(p.foreground) || p.autonomous.size
+    || [...p.detached.values()].some((value) => value === "active" || value === "cancellation_requested")
+    || [...p.background.values()].some((value) => value.state === "running")
+    || [...p.inspector.agents.values()].some((value) => value.status === "working" || value.status === "starting")
+    || (get().jobs[sessionId] ?? []).some((job) => ["starting", "running", "waiting"].includes(job.status))) throw { code: "NOT_READY", message: t("Wait for this session and its workers to finish before preparing a continuation."), retry: "user_action" };
+  if (p.queue.items.length || p.queue.sending) throw { code: "NOT_READY", message: t("Resolve or remove the queued messages before preparing a continuation."), retry: "user_action" };
+  const goal = get().odyssey[sessionId]?.goal;
+  if (goal && goal.state !== "complete" && goal.state !== "abandoned") throw { code: "NOT_READY", message: t("Move this goal from the Big Thing tab so its progress follows it."), retry: "user_action" };
+  return source;
+}
+
+async function validateLeaderSource(get: Get, expected: LiveSession, sequence?: string) {
+  const check = () => {
+    const current = idleHandoffSource(get, expected.handle.id);
+    if (current.handle.attachmentGeneration !== expected.handle.attachmentGeneration
+      || current.snapshot.agentSessionId !== expected.snapshot.agentSessionId
+      || current.snapshot.provider !== expected.snapshot.provider
+      || (current.snapshot.accountId ?? "default") !== (expected.snapshot.accountId ?? "default")) throw { code: "NOT_READY", message: t("The source session changed while the continuation was opening. Try again."), retry: "user_action" };
+  };
+  check();
+  const [snapshot, jobs, goal] = await Promise.all([
+    api.sessionSnapshot(expected.handle), api.delegationJobs(expected.handle),
+    expected.snapshot.agentSessionId ? api.odysseyForSession(expected.workspaceId, expected.snapshot.agentSessionId) : Promise.resolve(null),
+  ]);
+  check();
+  if ((sequence !== undefined && snapshot.lastSequence !== sequence)
+    || snapshot.agentSessionId !== expected.snapshot.agentSessionId || snapshot.provider !== expected.snapshot.provider
+    || (snapshot.accountId ?? "default") !== (expected.snapshot.accountId ?? "default")) throw { code: "NOT_READY", message: t("The source session changed while the continuation was opening. Try again."), retry: "user_action" };
+  if (["running", "awaiting_user", "cancelling"].includes(snapshot.foreground) || snapshot.autonomousTurns.length
+    || Object.values(snapshot.detachedCalls).some((value) => value === "active" || value === "cancellation_requested")
+    || snapshot.backgroundTasks?.some((value) => value.state === "running")
+    || jobs.some((job) => ["starting", "running", "waiting"].includes(job.status))) throw { code: "NOT_READY", message: t("Wait for this session and its workers to finish before preparing a continuation."), retry: "user_action" };
+  if (snapshot.queue?.items.length || snapshot.queue?.sending) throw { code: "NOT_READY", message: t("Resolve or remove the queued messages before preparing a continuation."), retry: "user_action" };
+  if (goal && goal.goal.state !== "complete" && goal.goal.state !== "abandoned") throw { code: "NOT_READY", message: t("Move this goal from the Big Thing tab so its progress follows it."), retry: "user_action" };
+}
+
+async function discardContinuation(get: Get, set: Set, handle: SessionHandle) {
+  try {
+    await api.sessionStop(handle);
+    const { [handle.id]: _unused, ...sessions } = get().sessions;
+    const { [handle.id]: _brief, ...sideBrief } = get().sideBrief;
+    set({ sessions, sideBrief, sessionOrder: get().sessionOrder.filter((key) => key !== handle.id) });
+  } catch { /* Keep a target that could not be stopped visible. */ }
+}
 
 function consumeContinuationBrief(get: Get, set: Set, sessionId: string) {
   const agent = get().sessions[sessionId]?.snapshot.agentSessionId;
-  const entry = agent ? get().continuations[agent] : undefined;
+  const entry = sessionContinuation(get().sessions[sessionId], get().continuations);
   if (!agent || !entry?.pendingBrief) return;
   const { pendingBrief: _sent, ...history } = entry;
   const continuations = { ...get().continuations, [agent]: history };
   set({ continuations });
-  void api.prefSet(CONTINUATIONS_KEY, continuations).catch(() => undefined);
+  continuationWrites = continuationWrites.catch(() => undefined).then(() => api.prefSet(CONTINUATIONS_KEY, get().continuations)).catch(() => undefined);
 }
 
 export function sessionTitle(session: LiveSession, records?: SessionRecord[]): string {
@@ -910,11 +1032,16 @@ async function attachLive(get: Get, set: Set, handle: SessionHandle, workspaceId
     usage: existing?.usage ?? EMPTY_SESSION_USAGE,
       lastEventAt: existing?.lastEventAt ?? null,
 };
+  const restoredBrief = sessionContinuation(live, get().continuations)?.pendingBrief;
+  const sameAttachment = existing?.workspaceId === workspaceId && existing.snapshot.provider === snapshot.provider
+    && existing.snapshot.agentSessionId === snapshot.agentSessionId
+    && (existing.snapshot.accountId ?? "default") === (snapshot.accountId ?? "default");
+  const previousBrief = sameAttachment ? get().sideBrief[id] : undefined;
+  const { [id]: _staleBrief, ...otherBriefs } = get().sideBrief;
   set({
     sessions: { ...get().sessions, [id]: live },
     sessionOrder: [...get().sessionOrder.filter((s) => s !== id), id],
-    ...(snapshot.agentSessionId && get().continuations[snapshot.agentSessionId]?.pendingBrief
-      ? { sideBrief: { ...get().sideBrief, [id]: get().continuations[snapshot.agentSessionId]!.pendingBrief! } } : {}),
+    sideBrief: restoredBrief || previousBrief ? { ...otherBriefs, [id]: (restoredBrief ?? previousBrief)! } : otherBriefs,
     ...(focus ? { view: { kind: "session", sessionId: id } as View, sessionTab: "transcript" as SessionTab } : {}),
   });
   // Read any goal this session is driving now rather than when its tab is
@@ -2477,6 +2604,28 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
+  async exportContinuity(sessionId) {
+    const session = get().sessions[sessionId];
+    if (!session) return;
+    set({ error: null });
+    try {
+      const { archive } = await saveContinuity(get, session);
+      const chunks: string[] = [];
+      let offset = 0;
+      for (;;) {
+        const page = await api.continuityRead(session.handle, archive.id, offset, 24000);
+        chunks.push(page.text);
+        if (page.nextOffset === null) break;
+        if (page.nextOffset <= offset) throw new Error("The continuity reader returned a non-advancing page.");
+        offset = page.nextOffset;
+      }
+      await api.saveTextFile(`continuity-${archive.id}.md`, chunks.join(""));
+    } catch (error) {
+      set({ error: asError(error) });
+      throw error;
+    }
+  },
+
   async openSession(workspaceId, mode, provider, launch) {
     // Which program wrote this session decides which one can resume it. The
     // record knows, and the native side reads it again on a resume: launching
@@ -2786,40 +2935,51 @@ export const useStore = create<State>((set, get) => ({
   },
 
   async handOff(sessionId, provider, preset) {
-    const session = get().sessions[sessionId];
-    if (!session) return;
-    const brief = handoffBrief(session.projection.cards, session.snapshot.provider);
-    const team = preset?.combo ?? get().teams[sessionId];
-    let key: string;
-    if (preset) {
-      try {
-        const opened = await api.sessionOpen({
+    if (leaderContinuations.has(sessionId) || quotaContinuationSessions.has(sessionId)) return;
+    leaderContinuations.add(sessionId);
+    let target: SessionHandle | null = null;
+    try {
+      const session = idleHandoffSource(get, sessionId);
+      await validateLeaderSource(get, session);
+      const { brief, archive, sequence } = await leaderBrief(get, session);
+      await validateLeaderSource(get, session, sequence);
+      const team = preset?.combo ?? get().teams[sessionId];
+      const opened = await api.sessionOpen({
           workspaceId: session.workspaceId,
           mode: { mode: "new" },
-          provider: preset.orchestrator.provider,
-          ...(preset.orchestrator.resources ? { resources: preset.orchestrator.resources } : {}),
-          ...(preset.orchestrator.model ? { model: preset.orchestrator.model } : {}),
-          ...(preset.orchestrator.effort ? { reasoningEffort: preset.orchestrator.effort } : {}),
-          combo: preset.combo,
-        });
-        await attachLive(get, set, opened.handle, session.workspaceId, false, opened.localSetup);
-        key = opened.handle.id;
-      } catch (error) {
-        set({ error: asError(error) });
-        return;
+          provider: preset?.orchestrator.provider ?? provider,
+          ...launchDefaults(get().sessionDefaults, preset?.orchestrator.provider ?? provider),
+          ...(preset?.orchestrator.resources ? { resources: preset.orchestrator.resources } : {}),
+          ...(preset?.orchestrator.model ? { model: preset.orchestrator.model } : {}),
+          ...(preset?.orchestrator.effort ? { reasoningEffort: preset.orchestrator.effort } : {}),
+          ...(team ? { combo: team } : {}),
+      });
+      target = opened.handle;
+      await attachLive(get, set, target, session.workspaceId, false, opened.localSetup);
+      await validateLeaderSource(get, session, sequence);
+      if (archive) {
+        requireContinuityReader(get().sessions[target.id]!.snapshot);
+        await api.continuityAttach(session.handle, target, archive.id);
       }
-    } else {
-      const opened = await get().openSessionFor(session.workspaceId, provider);
-      if (!opened) return;
-      key = opened.key;
-      if (team) await get().saveTeam(key, team);
+      const agent = get().sessions[target.id]?.snapshot.agentSessionId;
+      if (agent && session.snapshot.agentSessionId) {
+        await saveContinuation(get, set, agent, { fromAgentSessionId: session.snapshot.agentSessionId, fromProvider: session.snapshot.provider, target: continuationTarget(get().sessions[target.id]!), pendingBrief: brief, ...(archive ? { archive } : {}) });
+      }
+      await validateLeaderSource(get, session, sequence);
+      const key = target.id;
+      set({ drafts: { ...get().drafts, [key]: t("Continue from where the previous session stopped.") }, sideBrief: { ...get().sideBrief, [key]: brief }, ...(team ? { teams: { ...get().teams, [key]: team } } : {}), error: null });
+      target = null;
+      get().selectSession(key);
+    } catch (error) {
+      if (target) await discardContinuation(get, set, target);
+      set({ error: asError(error) });
+    } finally {
+      leaderContinuations.delete(sessionId);
     }
-    set({ drafts: { ...get().drafts, [key]: brief } });
-    get().selectSession(key);
   },
 
   async prepareQuotaContinuation(sessionId, target) {
-    if (quotaContinuationSessions.has(sessionId) || quotaContinuationProviders.has(target.provider)) return null;
+    if (leaderContinuations.has(sessionId) || quotaContinuationSessions.has(sessionId) || quotaContinuationProviders.has(target.provider)) return null;
     quotaContinuationSessions.add(sessionId);
     quotaContinuationProviders.add(target.provider);
     let opened: SessionHandle | null = null;
@@ -2884,12 +3044,18 @@ export const useStore = create<State>((set, get) => ({
       checkSource();
       const destination = get().sessions[opened.id];
       if (!destination?.snapshot.agentSessionId || destination.snapshot.accountId !== account.id) refuse(t("The source session changed while the continuation was opening. Try again."));
-      const brief = handoffBrief(current.projection.cards, snapshot.provider, 24_000);
-      const continuation: Continuation = { fromAgentSessionId: sourceAgent!, fromProvider: snapshot.provider, pendingBrief: brief };
+      const { brief, archive, sequence } = await leaderBrief(get, current, 24_000);
+      checkSource();
+      if (archive) {
+        requireContinuityReader(destination.snapshot);
+        await api.continuityAttach(source.handle, opened, archive.id);
+      }
+      const continuation: Continuation = { fromAgentSessionId: sourceAgent!, fromProvider: snapshot.provider, target: continuationTarget(destination), pendingBrief: brief, ...(archive ? { archive } : {}) };
       const destinationAgent = destination.snapshot.agentSessionId;
-      await api.prefSet(CONTINUATIONS_KEY, { ...get().continuations, [destinationAgent]: continuation });
+      await saveContinuation(get, set, destinationAgent, continuation);
       // Copy the latest composer state, including edits made during startup.
       checkSource();
+      await validateLeaderSource(get, source, sequence);
       set({
         drafts: { ...get().drafts, [opened.id]: get().drafts[sessionId]?.length ? get().drafts[sessionId]! : t("Continue from where the previous session stopped.") },
         attachments: { ...get().attachments, [opened.id]: [...(get().attachments[sessionId] ?? [])] },
@@ -3021,7 +3187,7 @@ export const useStore = create<State>((set, get) => ({
       if (stored && typeof stored === "object") {
         const sideBrief = { ...get().sideBrief };
         for (const [key, session] of Object.entries(get().sessions)) {
-          const brief = session.snapshot.agentSessionId ? stored[session.snapshot.agentSessionId]?.pendingBrief : undefined;
+          const brief = sessionContinuation(session, stored)?.pendingBrief;
           if (typeof brief === "string") sideBrief[key] = brief;
         }
         set({ continuations: stored, sideBrief });
@@ -3032,6 +3198,7 @@ export const useStore = create<State>((set, get) => ({
   },
 
   async continueOnProvider(sessionId) {
+    if (leaderContinuations.has(sessionId) || quotaContinuationSessions.has(sessionId)) return;
     const session = get().sessions[sessionId];
     const pending = get().pendingProvider[sessionId];
     const draft = get().drafts[sessionId] ?? "";
@@ -3044,15 +3211,22 @@ export const useStore = create<State>((set, get) => ({
     const team = get().teams[sessionId];
     // Nothing said yet: nothing to hand off. The session simply starts on
     // the chosen provider with the person's message.
-    const fresh = !hasConversation(session.projection.cards);
+    const fresh = !hasConversation(session.projection.cards) && !get().sideBrief[sessionId]
+      && !sessionContinuation(session, get().continuations);
     const provider = PROVIDER_LABELS[pending.provider];
     // The model the chip shows when none was picked: the provider's default,
     // else its first. Local Models has no account default to fall back on.
     const catalog = get().providerModels[pending.provider] ?? [];
     const shownModel = pending.model ?? (catalog.find((entry) => entry.isDefault) ?? catalog[0])?.id;
     const model = pending.provider === "local" ? shownModel : pending.model;
+    leaderContinuations.add(sessionId);
+    let target: SessionHandle | null = null;
+    let submitStarted = false;
     set({ busy: fresh ? t("Starting with {provider}", { provider }) : t("Continuing with {provider}", { provider }), error: null });
     try {
+      await validateLeaderSource(get, session);
+      const context = fresh ? undefined : await leaderBrief(get, session);
+      await validateLeaderSource(get, session, context?.sequence);
       const opened = await api.sessionOpen({
         workspaceId: session.workspaceId,
         mode: { mode: "new" },
@@ -3063,48 +3237,67 @@ export const useStore = create<State>((set, get) => ({
         ...(pending.effort ? { reasoningEffort: pending.effort } : {}),
         ...(team ? { combo: team } : {}),
       });
+      target = opened.handle;
       await attachLive(get, set, opened.handle, session.workspaceId, false, opened.localSetup);
       const key = opened.handle.id;
       const live = get().sessions[key];
       const agentSessionId = live?.snapshot.agentSessionId ?? opened.snapshot.agentSessionId ?? null;
+      await validateLeaderSource(get, session, context?.sequence);
+      if (context?.archive) {
+        requireContinuityReader(live?.snapshot ?? opened.snapshot);
+        await api.continuityAttach(session.handle, opened.handle, context.archive.id);
+      }
+      await validateLeaderSource(get, session, context?.sequence);
+      if (!fresh && agentSessionId && fromAgentSessionId) {
+        await saveContinuation(get, set, agentSessionId, { fromAgentSessionId, fromProvider: from, target: continuationTarget(live!), ...(context?.archive ? { archive: context.archive } : {}) });
+      }
+      await validateLeaderSource(get, session, context?.sequence);
       // The brief rides in front of the person's message; the transcript
       // shows only the message (see withoutHandoff).
-      const prompt = fresh ? draft : `${handoffBrief(session.projection.cards, from)}${HANDOFF_SPLIT}${draft}`;
+      const prompt = context ? `${context.brief}${HANDOFF_SPLIT}${draft}` : draft;
+      submitStarted = true;
       const response = await api.sessionSubmit(opened.handle, crypto.randomUUID(), prompt, attachments.map((a) => a.id), mentions);
       if (response.outcome.outcome !== "accepted") {
         // Nothing changes for the person: the draft stays, and the session
         // opened for it goes away.
-        await api.sessionStop(opened.handle).catch(() => undefined);
-        const { [key]: _unused, ...kept } = get().sessions;
-        set({ sessions: kept, sessionOrder: get().sessionOrder.filter((id) => id !== key), error: response.outcome.error });
+        await discardContinuation(get, set, opened.handle);
+        target = null;
+        set({ error: response.outcome.error });
         return;
       }
+      target = null; // Accepted work must stay visible, even if later housekeeping fails.
+      const composerUnchanged = (get().drafts[sessionId] ?? "") === draft
+        && JSON.stringify(get().attachments[sessionId] ?? []) === JSON.stringify(attachments)
+        && JSON.stringify(get().mentions[sessionId] ?? []) === JSON.stringify(mentions);
       const { [sessionId]: _done, ...pendingRest } = get().pendingProvider;
       set({
-        drafts: { ...get().drafts, [sessionId]: "" },
-        attachments: { ...get().attachments, [sessionId]: [] },
-        mentions: { ...get().mentions, [sessionId]: [] },
+        ...(composerUnchanged ? {
+          drafts: { ...get().drafts, [sessionId]: "" },
+          attachments: { ...get().attachments, [sessionId]: [] },
+          mentions: { ...get().mentions, [sessionId]: [] },
+        } : {}),
         pendingProvider: pendingRest,
         ...(fresh ? {} : { continuationHistory: { ...get().continuationHistory, [key]: session.projection.cards } }),
       });
       if (!fresh && agentSessionId && fromAgentSessionId) {
-        const continuations = { ...get().continuations, [agentSessionId]: { fromAgentSessionId, fromProvider: from } };
-        set({ continuations });
-        void api.prefSet(CONTINUATIONS_KEY, continuations).catch(() => undefined);
         // One conversation in the list: the new session keeps the title,
         // and the earlier one is archived (still there among archived).
         await get().renameSession(session.workspaceId, agentSessionId, title);
       }
       get().selectSession(key);
-      if (fromAgentSessionId) {
+      if (fromAgentSessionId && composerUnchanged) {
         await api.sessionStop(session.handle).catch(() => undefined);
         const { [sessionId]: _stopped, ...rest } = get().sessions;
         set({ sessions: rest, sessionOrder: get().sessionOrder.filter((id) => id !== sessionId) });
         await get().archiveSession(session.workspaceId, fromAgentSessionId, true);
       }
     } catch (error) {
+      // An IPC error after submit may have accepted work. Leave that target
+      // visible and keep the source; durable outbox reconciliation owns it.
+      if (target && !submitStarted) await discardContinuation(get, set, target);
       set({ error: asError(error) });
     } finally {
+      leaderContinuations.delete(sessionId);
       set({ busy: null });
     }
   },
@@ -3252,6 +3445,7 @@ export const useStore = create<State>((set, get) => ({
   },
 
   async send(sessionId) {
+    if (leaderContinuations.has(sessionId) || quotaContinuationSessions.has(sessionId)) return;
     const pending = get().pendingProvider[sessionId];
     if (pending && switchesSession(get().sessions[sessionId], pending)) return get().continueOnProvider(sessionId);
     const session = get().sessions[sessionId];
@@ -3300,6 +3494,7 @@ export const useStore = create<State>((set, get) => ({
   },
 
   async steer(sessionId) {
+    if (leaderContinuations.has(sessionId) || quotaContinuationSessions.has(sessionId)) return;
     const session = get().sessions[sessionId];
     const draft = get().drafts[sessionId] ?? "";
     if (!session || !draft.trim() || session.steerInFlight) return;
@@ -3317,6 +3512,7 @@ export const useStore = create<State>((set, get) => ({
   },
 
   async enqueue(sessionId) {
+    if (leaderContinuations.has(sessionId) || quotaContinuationSessions.has(sessionId)) return;
     const session = get().sessions[sessionId];
     const draft = get().drafts[sessionId] ?? "";
     const attachments = get().attachments[sessionId] ?? [];

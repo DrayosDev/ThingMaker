@@ -1619,7 +1619,14 @@ export type UiPrefs = {
   followUp: "queue" | "steer";
   /** Whether a newer ThingMaker found at startup is offered in a popup. Absent on older saves: on. */
   updateReminder?: boolean;
+  /** Save a private, readable context archive on a leader change. Absent means on. */
+  autoContinuity?: boolean;
 };
+
+/** An immutable Markdown context snapshot in ThingMaker's private data directory. */
+export type ContinuityArchive = { id: string; path: string; bytes: number; createdAtUnixMs: number };
+/** Character offsets count Unicode code points, matching the team reader. */
+export type ContinuityPage = { archive: ContinuityArchive; text: string; nextOffset: number | null; totalChars: number };
 
 /** A newer ThingMaker release than the running one (REL-03). */
 export type AvailableUpdate = { version: string; notes?: string; publishedAtUnixMs?: number };
@@ -1817,6 +1824,9 @@ export const COMMANDS = {
   sessionCancel: "session_cancel",
   sessionSetConfigOption: "session_set_config_option",
   sessionStop: "session_stop",
+  continuitySave: "continuity_save",
+  continuityAttach: "continuity_attach",
+  continuityRead: "continuity_read",
   sessionListOpen: "session_list_open",
   sessionArchive: "session_archive",
   sessionPin: "session_pin",

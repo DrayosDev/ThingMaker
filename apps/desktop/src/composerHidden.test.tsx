@@ -21,7 +21,7 @@ describe("hiding the prompt on the Big Thing view", () => {
     expect(guard).toBeGreaterThan(0);
     // The guard wraps the prompt card, so the attachments strip, the model
     // picker and "stop session" go with it rather than floating alone.
-    expect(panel.slice(guard, guard + 400)).toContain('<div className="composer-card">');
+    expect(panel.slice(guard, panel.indexOf("</>", guard))).toContain('<div className="composer-card">');
   });
 
   it("leaves the activity strip outside the guard", () => {

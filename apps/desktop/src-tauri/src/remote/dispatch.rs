@@ -16,12 +16,15 @@ use serde_json::Value;
 use tauri::{AppHandle, Manager};
 use thingmaker_supervisor::DesktopError;
 
-use crate::commands::{app as app_commands, artifacts, attachments, bigthing, delegation, git, odyssey, providers, quick, review, session, workspace};
+use crate::commands::{app as app_commands, artifacts, attachments, bigthing, continuity, delegation, git, odyssey, providers, quick, review, session, workspace};
 use crate::state::AppState;
 
 /// The commands a phone may call. `session_subscribe` is the connection's
 /// own (it streams), handled beside these.
 pub const ALLOWED: &[&str] = &[
+    "continuity_save",
+    "continuity_attach",
+    "continuity_read",
     "execution_profiles",
     "workspace_list",
     // Read-only: the phone lists quick chats apart; making, changing and
@@ -206,6 +209,9 @@ pub async fn dispatch(app: &AppHandle, command: &str, args: Value) -> Result<Val
         "session_list_open" => sync_call!(app, args, session::session_list_open),
         "session_records" => async_call!(app, args, session::session_records, "workspaceId"),
         "session_snapshot" => async_call!(app, args, session::session_snapshot, "handle"),
+        "continuity_save" => async_call!(app, args, continuity::continuity_save, "handle", "markdown"),
+        "continuity_attach" => async_call!(app, args, continuity::continuity_attach, "source", "target", "archiveId"),
+        "continuity_read" => async_call!(app, args, continuity::continuity_read, "handle", "archiveId", "offset", "limit"),
         "session_background_stop" => async_call!(app, args, session::session_background_stop, "request"),
         "session_background_output" => async_call!(app, args, session::session_background_output, "request"),
         "session_history" => async_call!(app, args, session::session_history, "request"),

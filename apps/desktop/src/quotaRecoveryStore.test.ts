@@ -38,6 +38,8 @@ beforeEach(() => {
   vi.spyOn(api, "sessionOpen").mockImplementation(async (request) => opened(request));
   vi.spyOn(api, "sessionSubscribe").mockResolvedValue(undefined);
   vi.spyOn(api, "sessionHistory").mockResolvedValue([]);
+  vi.spyOn(api, "continuitySave").mockResolvedValue({ id: "00000000-0000-4000-8000-000000000001", path: "C:/private/context.md", bytes: 100, createdAtUnixMs: 1 });
+  vi.spyOn(api, "continuityAttach").mockResolvedValue(undefined);
   vi.spyOn(api, "prefSet").mockResolvedValue(undefined);
   vi.spyOn(api, "accountSetActive").mockResolvedValue(undefined);
   vi.spyOn(api, "sessionStop").mockResolvedValue({ status: 0, signal: null, forced: false });

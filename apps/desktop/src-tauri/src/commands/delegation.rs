@@ -53,6 +53,7 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
             engine.note_job(job);
         }
     });
+    delegation.add_extension(Arc::new(super::continuity::ContinuityTools { app: app.clone() }));
     let path = socket_path(&state.data_dir);
     let socket = tauri::async_runtime::block_on(async { DelegationSocket::bind(delegation.clone(), path) }).map_err(|error| format!("could not open the ThingMaker MCP socket: {error}"))?;
     tracing::info!(path = %socket.path().display(), "ThingMaker MCP socket listening");
