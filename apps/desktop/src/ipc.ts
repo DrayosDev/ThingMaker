@@ -168,6 +168,8 @@ export type OpenRequest = {
   mode: { mode: "new" } | { mode: "resume"; session_id: string } | { mode: "fork"; session_id: string };
   /** Which provider to launch. On a resume the session's own record wins. */
   provider?: Provider;
+  /** Pin this session to an account without changing the provider's active account. */
+  accountId?: string;
   model?: string;
   reasoningEffort?: string;
   /** The team the session starts with; absent keeps its own, or the default. */

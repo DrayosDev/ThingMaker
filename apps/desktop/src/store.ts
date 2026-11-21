@@ -56,6 +56,7 @@ import { EMPTY_COMBO, JOB_EVENT, ULTRA_REVIEW_EVENT, type UltraReview, type UrDe
 import { isLocalChat } from "./localModels";
 import { HANDOFF_SPLIT, handoffBrief, hasConversation, helperPresetFrom, readHelperPresets, readPresets, upsertHelperPreset, upsertJob, upsertPreset, withoutHandoff, type HelperPreset } from "./team";
 import { copiesItself, forkBranch, forkTitle, type ForkPoint } from "./fork";
+import { sessionUsesActiveAccount } from "./quotaRecovery";
 
 /** Preference keys (scope `ui`) for saved teams. */
 const TEAM_PRESETS_KEY = "teamPresets";
@@ -422,6 +423,8 @@ type State = {
    * is put in the new session's composer to read and send.
    */
   handOff: (sessionId: string, provider: Provider, preset?: TeamPreset) => Promise<void>;
+  /** Prepares an editable continuation after exhaustion; never sends a prompt. */
+  prepareQuotaContinuation: (sessionId: string, target: { provider: Provider; accountId?: string }) => Promise<string | null>;
   /**
    * Copies a session into a new one nested under it, on the same provider,
    * model, effort and team, and opens it. With a point, the copy ends there
@@ -655,9 +658,21 @@ export type PendingProvider = { resources?: WorkerSlot["resources"]; provider: P
 export type ForkSource = { workspaceId: string; agentSessionId: string; provider: Provider; key?: string };
 
 /** A session that carries on another's conversation on a different provider. */
-export type Continuation = { fromAgentSessionId: string; fromProvider: Provider };
+export type Continuation = { fromAgentSessionId: string; fromProvider: Provider; pendingBrief?: string };
 
 const CONTINUATIONS_KEY = "session_continuations";
+const quotaContinuationSessions = new Set<string>();
+const quotaContinuationProviders = new Set<Provider>();
+
+function consumeContinuationBrief(get: Get, set: Set, sessionId: string) {
+  const agent = get().sessions[sessionId]?.snapshot.agentSessionId;
+  const entry = agent ? get().continuations[agent] : undefined;
+  if (!agent || !entry?.pendingBrief) return;
+  const { pendingBrief: _sent, ...history } = entry;
+  const continuations = { ...get().continuations, [agent]: history };
+  set({ continuations });
+  void api.prefSet(CONTINUATIONS_KEY, continuations).catch(() => undefined);
+}
 
 export function sessionTitle(session: LiveSession, records?: SessionRecord[]): string {
   const id = session.snapshot.agentSessionId;
@@ -898,6 +913,8 @@ async function attachLive(get: Get, set: Set, handle: SessionHandle, workspaceId
   set({
     sessions: { ...get().sessions, [id]: live },
     sessionOrder: [...get().sessionOrder.filter((s) => s !== id), id],
+    ...(snapshot.agentSessionId && get().continuations[snapshot.agentSessionId]?.pendingBrief
+      ? { sideBrief: { ...get().sideBrief, [id]: get().continuations[snapshot.agentSessionId]!.pendingBrief! } } : {}),
     ...(focus ? { view: { kind: "session", sessionId: id } as View, sessionTab: "transcript" as SessionTab } : {}),
   });
   // Read any goal this session is driving now rather than when its tab is
@@ -938,7 +955,7 @@ async function attachLive(get: Get, set: Set, handle: SessionHandle, workspaceId
       }
       if (payload.type === "quota") {
         const { type: _type, ...quota } = payload;
-        get().noteQuota(quota);
+        if (sessionUsesActiveAccount(current.snapshot, get().accounts)) get().noteQuota(quota);
       }
       if (payload.type === "turn" && payload.effect === "settled" && payload.kind === "foreground") {
         turnStartedAt = null;
@@ -1467,7 +1484,8 @@ export const useStore = create<State>((set, get) => ({
     // readings arrive as quota events on the session's own stream, so a turn
     // boundary reads the latest one rather than asking anything.
     if (get().sessionAgent(sessionId) !== "codex") return;
-    const snapshot = get().usage.codex ?? null;
+    const snapshot = before.projection.quota ? usageFromQuota(before.projection.quota)
+      : sessionUsesActiveAccount(before.snapshot, get().accounts) ? get().usage.codex ?? null : null;
     const patch = (usage: Partial<SessionUsage>) => {
       const current = get().sessions[sessionId];
       if (current) set({ sessions: { ...get().sessions, [sessionId]: { ...current, usage: { ...current.usage, ...usage } } } });
@@ -2800,6 +2818,108 @@ export const useStore = create<State>((set, get) => ({
     get().selectSession(key);
   },
 
+  async prepareQuotaContinuation(sessionId, target) {
+    if (quotaContinuationSessions.has(sessionId) || quotaContinuationProviders.has(target.provider)) return null;
+    quotaContinuationSessions.add(sessionId);
+    quotaContinuationProviders.add(target.provider);
+    let opened: SessionHandle | null = null;
+    function refuse(message: string): never { throw { code: "NOT_READY", message, retry: "user_action" }; }
+    const checkSource = () => {
+      const session = get().sessions[sessionId];
+      if (!session || session.projection.attachment !== "attached" || session.projection.process === "exited") refuse(t("The source session changed while the continuation was opening. Try again."));
+      if (!session!.projection.quotaFailure) refuse(t("This session has not reported an exhausted usage limit."));
+      const projection = session!.projection;
+      if (session!.inFlightRequestId || session!.pendingPrompt || session!.steerInFlight
+        || ["running", "awaiting_user", "cancelling"].includes(projection.foreground)
+        || projection.autonomous.size > 0
+        || [...projection.detached.values()].some((state) => state === "active" || state === "cancellation_requested")
+        || [...projection.background.values()].some((task) => task.state === "running")
+        || [...projection.inspector.agents.values()].some((agent) => agent.status === "working" || agent.status === "starting")
+        || (get().jobs[sessionId] ?? []).some((job) => ["starting", "running", "waiting"].includes(job.status))) refuse(t("Wait for this session and its workers to finish before preparing a continuation."));
+      if (projection.queue.items.length || projection.queue.sending) refuse(t("Resolve or remove the queued messages before preparing a continuation."));
+      const goal = get().odyssey[sessionId]?.goal;
+      if (goal && goal.state !== "complete" && goal.state !== "abandoned") refuse(t("Move this goal from the Big Thing tab so its progress follows it."));
+      return session!;
+    };
+    const checkSnapshot = (snapshot: Snapshot) => {
+      if (["running", "awaiting_user", "cancelling"].includes(snapshot.foreground) || snapshot.autonomousTurns.length
+        || Object.values(snapshot.detachedCalls).some((state) => state === "active" || state === "cancellation_requested")
+        || snapshot.backgroundTasks?.some((task) => task.state === "running")) refuse(t("Wait for this session and its workers to finish before preparing a continuation."));
+      if (snapshot.queue?.items.length || snapshot.queue?.sending) refuse(t("Resolve or remove the queued messages before preparing a continuation."));
+    };
+    try {
+      const source = checkSource();
+      const sourceAgent = source.snapshot.agentSessionId;
+      if (!sourceAgent || !ACCOUNT_PROVIDERS.includes(target.provider)) refuse(t("Choose another signed-in account or provider."));
+      const [accounts, snapshot, jobs, combo, goal] = await Promise.all([
+        api.accountsList(target.provider), api.sessionSnapshot(source.handle), api.delegationJobs(source.handle),
+        api.delegationComboGet(source.handle), api.odysseyForSession(source.workspaceId, sourceAgent!),
+      ]);
+      checkSource();
+      checkSnapshot(snapshot);
+      if (jobs.some((job) => ["starting", "running", "waiting"].includes(job.status))) refuse(t("Wait for this session and its workers to finish before preparing a continuation."));
+      if (goal && goal.goal.state !== "complete" && goal.goal.state !== "abandoned") refuse(t("Move this goal from the Big Thing tab so its progress follows it."));
+      const account = target.accountId ? accounts.find((entry) => entry.id === target.accountId) : accounts.find((entry) => entry.active);
+      const provider = get().providers?.find((entry) => entry.provider === target.provider);
+      if (!provider?.resolved || !account || account.provider !== target.provider || account.auth?.loggedIn !== true || account.auth.setupRequired
+        || (snapshot.provider === target.provider && (snapshot.accountId ?? "default") === account.id)) refuse(t("Choose another signed-in account or provider."));
+      const options = asConfigOptions(source.projection.configOptions ?? source.snapshot.configOptions);
+      const configValue = (id: string) => {
+        const value = options.find((option) => option.configId === id)?.currentValue;
+        return typeof value === "string" && value !== "default" ? value : undefined;
+      };
+      const model = snapshot.provider === target.provider ? configValue("model") : undefined;
+      const effort = snapshot.provider === target.provider ? options.find((option) => isEffortOption(option.configId))?.currentValue : undefined;
+      const response = await api.sessionOpen({
+        workspaceId: source.workspaceId, mode: { mode: "new" }, provider: target.provider, accountId: account.id,
+        ...launchDefaults(get().sessionDefaults, target.provider),
+        ...(model ? { model } : {}), ...(typeof effort === "string" ? { reasoningEffort: effort } : {}), combo: combo ?? EMPTY_COMBO,
+      });
+      opened = response.handle;
+      // An older host must not silently ignore the selected account.
+      if (response.snapshot.provider !== target.provider || response.snapshot.accountId !== account.id) refuse(t("Choose another signed-in account or provider."));
+      await attachLive(get, set, opened, source.workspaceId, false, response.localSetup);
+      const current = checkSource();
+      checkSnapshot(await api.sessionSnapshot(source.handle));
+      checkSource();
+      const destination = get().sessions[opened.id];
+      if (!destination?.snapshot.agentSessionId || destination.snapshot.accountId !== account.id) refuse(t("The source session changed while the continuation was opening. Try again."));
+      const brief = handoffBrief(current.projection.cards, snapshot.provider, 24_000);
+      const continuation: Continuation = { fromAgentSessionId: sourceAgent!, fromProvider: snapshot.provider, pendingBrief: brief };
+      const destinationAgent = destination.snapshot.agentSessionId;
+      await api.prefSet(CONTINUATIONS_KEY, { ...get().continuations, [destinationAgent]: continuation });
+      // Copy the latest composer state, including edits made during startup.
+      checkSource();
+      set({
+        drafts: { ...get().drafts, [opened.id]: get().drafts[sessionId]?.length ? get().drafts[sessionId]! : t("Continue from where the previous session stopped.") },
+        attachments: { ...get().attachments, [opened.id]: [...(get().attachments[sessionId] ?? [])] },
+        mentions: { ...get().mentions, [opened.id]: [...(get().mentions[sessionId] ?? [])] },
+        teams: { ...get().teams, [opened.id]: combo ?? EMPTY_COMBO },
+        sideBrief: { ...get().sideBrief, [opened.id]: brief },
+        continuations: { ...get().continuations, [destinationAgent]: continuation },
+        continuationHistory: { ...get().continuationHistory, [opened.id]: [...current.projection.cards] }, error: null,
+      });
+      const key = opened.id;
+      opened = null;
+      get().selectSession(key);
+      void get().renameSession(source.workspaceId, destinationAgent, sessionTitle(current));
+      return key;
+    } catch (error) {
+      if (opened) {
+        try {
+          await api.sessionStop(opened);
+          const { [opened.id]: _unused, ...sessions } = get().sessions;
+          set({ sessions, sessionOrder: get().sessionOrder.filter((key) => key !== opened!.id) });
+        } catch { /* Leave a target that could not be stopped visible. The source is untouched. */ }
+      }
+      set({ error: asError(error) });
+      return null;
+    } finally {
+      quotaContinuationSessions.delete(sessionId);
+      quotaContinuationProviders.delete(target.provider);
+    }
+  },
+
   async forkSession(source, point, how) {
     const { workspaceId, agentSessionId, provider } = source;
     const live = (source.key ? get().sessions[source.key] : undefined) ?? Object.values(get().sessions).find((session) => session.snapshot.agentSessionId === agentSessionId);
@@ -2898,7 +3018,14 @@ export const useStore = create<State>((set, get) => ({
   async loadContinuations() {
     try {
       const stored = await api.prefGet<Record<string, Continuation>>(CONTINUATIONS_KEY);
-      if (stored && typeof stored === "object") set({ continuations: stored });
+      if (stored && typeof stored === "object") {
+        const sideBrief = { ...get().sideBrief };
+        for (const [key, session] of Object.entries(get().sessions)) {
+          const brief = session.snapshot.agentSessionId ? stored[session.snapshot.agentSessionId]?.pendingBrief : undefined;
+          if (typeof brief === "string") sideBrief[key] = brief;
+        }
+        set({ continuations: stored, sideBrief });
+      }
     } catch {
       // None yet.
     }
@@ -3155,6 +3282,7 @@ export const useStore = create<State>((set, get) => ({
         if (brief) {
           const { [sessionId]: _sent, ...rest } = get().sideBrief;
           set({ sideBrief: rest });
+          consumeContinuationBrief(get, set, sessionId);
         }
         reportsSent(get, set, session.snapshot.agentSessionId);
         const current = get().sessions[sessionId];
@@ -3211,6 +3339,7 @@ export const useStore = create<State>((set, get) => ({
       if (brief) {
         const { [sessionId]: _sent, ...rest } = get().sideBrief;
         set({ sideBrief: rest });
+        consumeContinuationBrief(get, set, sessionId);
       }
       reportsSent(get, set, session.snapshot.agentSessionId);
       const current = get().sessions[sessionId];

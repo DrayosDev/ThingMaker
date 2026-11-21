@@ -249,6 +249,48 @@ async fn a_goal_runs_from_its_briefing_to_complete_with_every_milestone_verified
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_disconnected_gemini_goal_is_rejected_before_worktree_or_session_creation() {
+    let fixture = fixture_with(&[]).expect("Python is required for the Big Thing fixture");
+    let goal_id = {
+        let storage = fixture.storage.lock().unwrap();
+        let row = storage.session_upsert(&fixture.host.workspace_id, "old-gemini", SessionOrigin::Desktop, Provider::Gemini).unwrap();
+        storage.odyssey_create(&NewOdyssey { workspace_id: fixture.host.workspace_id.clone(), session_id: Some(row.id), title: "Unsupported goal".into(), max_continuations: 1, isolate: true, ..Default::default() }).unwrap().id
+    };
+    let error = fixture.engine.start_goal(&goal_id).await.unwrap_err();
+    assert!(error.message.contains("Gemini"), "{error:?}");
+    let view = fixture.engine.view(&goal_id).unwrap().unwrap();
+    assert_eq!(view.goal.state, OdysseyState::Draft);
+    assert!(view.goal.worktree_path.is_none());
+    assert!(fixture.host.opened.lock().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_gemini_preset_is_rejected_before_opening_an_isolated_goal() {
+    let fixture = fixture_with(&[]).expect("Python is required for the Big Thing fixture");
+    let goal_id = fixture.storage.lock().unwrap().odyssey_create(&NewOdyssey {
+        workspace_id: fixture.host.workspace_id.clone(), title: "Unsupported preset".into(), max_continuations: 1, isolate: true,
+        team: Some(json!({"orchestrator":{"provider":"gemini"},"combo":{}})), ..Default::default()
+    }).unwrap().id;
+    let error = fixture.engine.start_goal(&goal_id).await.unwrap_err();
+    assert!(error.message.contains("Gemini"), "{error:?}");
+    assert!(fixture.host.opened.lock().unwrap().is_empty());
+    assert!(fixture.engine.view(&goal_id).unwrap().unwrap().goal.worktree_path.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unsupported_move_does_not_cancel_the_current_turn() {
+    let fixture = fixture_with(&["--slow=30"]).expect("Python is required for the Big Thing fixture");
+    let (goal_id, live) = fixture.goal(1).await;
+    live.actor.submit_text("still-working", "Keep working").await.unwrap();
+    assert_eq!(live.actor.snapshot().await.unwrap().foreground, thingmaker_supervisor::supervisor::TurnPhase::Running);
+    let error = fixture.engine.move_goal(&goal_id, thingmaker_supervisor::bigthing::engine::MoveTarget::New { provider: Provider::Gemini }).await.unwrap_err();
+    assert!(error.message.contains("Gemini"), "{error:?}");
+    assert_eq!(live.actor.snapshot().await.unwrap().foreground, thingmaker_supervisor::supervisor::TurnPhase::Running);
+    assert!(fixture.host.opened.lock().unwrap().is_empty());
+    live.actor.stop().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_spent_account_parks_the_run_with_its_reset_time_instead_of_blocking_it() {
     let Some(fixture) = fixture_with(&["--limit"]) else { return };
     let (goal_id, _live) = fixture.goal(1).await;

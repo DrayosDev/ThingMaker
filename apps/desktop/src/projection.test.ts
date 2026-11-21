@@ -45,6 +45,23 @@ describe("tool patch merging", () => {
 });
 
 describe("message projection", () => {
+  it("tracks only current session exhaustion and clears the recovery state after success", () => {
+    const projection = emptyProjection();
+    applyEvent(projection, envelope({ type: "turn", effect: "started", kind: "foreground" }));
+    applyEvent(projection, envelope({ type: "quota", provider: "codex", status: "rejected", observedAtUnixMs: 1, windows: [] }));
+    applyEvent(projection, envelope({ type: "turn", effect: "settled", kind: "foreground", phase: "failed", error: "request failed" }));
+    expect(projection.quotaFailure).toBe(true);
+    applyEvent(projection, envelope({ type: "turn", effect: "started", kind: "foreground" }));
+    expect(projection.quotaFailure).toBe(false);
+    applyEvent(projection, envelope({ type: "turn", effect: "settled", kind: "foreground", phase: "succeeded" }));
+    expect(projection.quotaFailure).toBe(false);
+    expect(projection.quota?.status).toBe("rejected");
+    applyEvent(projection, envelope({ type: "turn", effect: "settled", kind: "foreground", phase: "failed", error: "You've hit your usage limit" }));
+    expect(projection.quotaFailure).toBe(true);
+    applyEvent(projection, envelope({ type: "quota", provider: "codex", status: "allowed", observedAtUnixMs: 2, windows: [] }));
+    expect(projection.quotaFailure).toBe(false);
+  });
+
   it("appends chunks, replaces on full messages and distinguishes omitted content", () => {
     const projection = emptyProjection();
     applyEvent(projection, envelope({ type: "update", kind: "agent_message", messageId: "a", content: [{ type: "text", text: "stale " }], replace: false, hasContent: true }));

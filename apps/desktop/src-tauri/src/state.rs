@@ -323,18 +323,27 @@ impl AppState {
         id.filter(|id| self.accounts().iter().any(|account| account.provider == provider && &account.id == id)).unwrap_or_else(|| accounts::DEFAULT_ACCOUNT.to_string())
     }
 
+    /// Resolve once before launching, so later global account changes cannot
+    /// redirect a session. Explicit invalid accounts never select the default.
+    pub fn session_account_id(&self, provider: Provider, requested: Option<&str>) -> Result<String, DesktopError> {
+        use thingmaker_supervisor::agents::accounts;
+        let id = requested.map(str::to_string).unwrap_or_else(|| self.active_account(provider));
+        if id == accounts::DEFAULT_ACCOUNT { return Ok(id); }
+        if !accounts::valid_id(&id) { return Err(DesktopError::unsupported("invalid account id")); }
+        if !accounts::supports_accounts(provider) || !self.accounts().iter().any(|account| account.provider == provider && account.id == id) {
+            return Err(DesktopError::not_ready("that account does not belong to this provider or is gone"));
+        }
+        Ok(id)
+    }
+
     /// The settings folder of account `id` (the active one when `None`),
     /// shared with the person's main folder again before it is used. `None`
     /// for the default account, which is the person's own folder.
     pub fn try_account_folder(&self, provider: Provider, id: Option<&str>) -> Result<Option<PathBuf>, DesktopError> {
         use thingmaker_supervisor::agents::accounts;
-        let id = id.map(str::to_string).unwrap_or_else(|| self.active_account(provider));
-        if id == accounts::DEFAULT_ACCOUNT || !accounts::supports_accounts(provider) {
+        let id = self.session_account_id(provider, id)?;
+        if id == accounts::DEFAULT_ACCOUNT {
             return Ok(None);
-        }
-        if !accounts::valid_id(&id) { return Err(DesktopError::unsupported("invalid account id")); }
-        if !self.accounts().iter().any(|account| account.provider == provider && account.id == id) {
-            return Err(DesktopError::not_ready("that account is gone"));
         }
         let home = self.home.clone().ok_or_else(|| DesktopError::not_ready("home directory unavailable"))?;
         let folder = accounts::account_folder(&self.data_dir, provider, &id);

@@ -171,10 +171,10 @@ export const PROVIDER_LABELS: Record<Provider, string> = { claude: "Claude Code"
 export const PROVIDER_SHORT: Record<Provider, string> = { claude: "CC", codex: "CX", gemini: "GM", local: "LM" };
 /**
  * Providers that can lead a team. An orchestrator has to take the session's
- * own `team` MCP server; Antigravity's `agy` only reads MCP servers from its
- * global configuration, so Gemini is a worker or a plain session.
+ * own `team` MCP server. Gemini team sessions use native `agy acp` to receive
+ * session-local servers without changing the user's shared configuration.
  */
-export const ORCHESTRATOR_PROVIDERS: readonly Provider[] = ["claude", "codex", "local"] as const;
+export const ORCHESTRATOR_PROVIDERS: readonly Provider[] = ["claude", "codex", "gemini", "local"] as const;
 
 /**
  * Local Models: models in Ollama on this computer, free and private. A model
@@ -348,6 +348,8 @@ export type Snapshot = {
   handle: SessionHandle;
   /** The provider this attachment runs on, and so which account it spends. */
   provider: Provider;
+  /** Account fixed when this attachment opened; independent of the global picker. */
+  accountId?: string | null;
   historyStart: DecimalId;
   historyDropped: number;
   /** The agent's own id for the session, once `session/new` has answered. */
@@ -415,9 +417,9 @@ export function asConfigOptions(value: unknown): SessionConfigOption[] {
   return out;
 }
 
-/** Whether a config option is the reasoning effort, by either dialect's id. */
+/** Whether a config option is the reasoning effort, by the provider's advertised id. */
 export function isEffortOption(configId: string): boolean {
-  return configId === "effort" || configId === "reasoning_effort";
+  return configId === "effort" || configId === "reasoning_effort" || configId === "thought_level";
 }
 
 export type SubmissionOutcome =
@@ -806,7 +808,7 @@ export type OnReport = "wait" | "continue";
 export type OnPlanChange = "tasks_auto" | "review" | "auto";
 /** Which orchestrator a goal runs on. `either` starts where it is and moves
  *  when the account it is on is spent; the other two pin it. */
-/** Who runs a Big Thing goal. Gemini cannot lead (it takes no session MCP server). */
+/** Who runs a Big Thing goal. Separate from ordinary saved-team leadership. */
 export type Orchestrator = "claude" | "codex" | "either";
 
 /** What the Claude account said about itself when it was last asked.

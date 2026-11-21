@@ -12,7 +12,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { ODYSSEY_STATE_NOTE, ORCHESTRATOR_PROVIDERS, PROVIDER_LABELS, type AdoptedPlan, type Orchestrator, type OnPlanChange, type OnReport, type CheckKind, type MilestoneRecord, type OdysseyView, type OnUsageReset, type Provider, type StopCondition, type TeamPreset } from "@thingmaker/contracts";
+import { ODYSSEY_STATE_NOTE, PROVIDER_LABELS, type AdoptedPlan, type Orchestrator, type OnPlanChange, type OnReport, type CheckKind, type MilestoneRecord, type OdysseyView, type OnUsageReset, type Provider, type StopCondition, type TeamPreset } from "@thingmaker/contracts";
 import { PLAN_REQUESTED, useStore } from "../store";
 import { checkLabel } from "../odysseyPrompt";
 import { milestoneTurnKey } from "../bigThingTurns";
@@ -30,6 +30,10 @@ import { planSummary, allManual } from "../odysseyPlan";
 import { api } from "../ipc";
 import { IconAlertCircle, IconCheckCircle, IconChevron, IconCode, IconDots, IconPlus, IconX } from "./icons";
 import { t } from "../i18n";
+
+// Big Thing's supported leaders are separate from ordinary saved teams.
+const GOAL_PROVIDERS: readonly Provider[] = ["claude", "codex", "local"];
+const canLeadGoal = (provider: Provider | undefined) => provider !== undefined && GOAL_PROVIDERS.includes(provider);
 
 const STOP_LABEL: Record<StopCondition, string> = {
   goal_complete: t("All milestones"),
@@ -479,7 +483,7 @@ function MoveMenu({ sessionId }: { sessionId: string }) {
   if (!here) return null;
   // A session already driving a live goal cannot take this one: the record
   // allows exactly one live goal per session, and the move would be refused.
-  const others = Object.entries(sessions).filter(([key, session]) => key !== sessionId && session.workspaceId === here.workspaceId && !goals[key]);
+  const others = Object.entries(sessions).filter(([key, session]) => key !== sessionId && session.workspaceId === here.workspaceId && !goals[key] && canLeadGoal(session.snapshot.provider));
   return (
     <>
       <button aria-expanded={open} className="link small" onClick={() => setOpen(!open)} type="button">
@@ -502,7 +506,7 @@ function MoveMenu({ sessionId }: { sessionId: string }) {
               {AGENT_LABEL[session.snapshot.provider]} · {session.snapshot.agentSessionId ?? key}
             </button>
           ))}
-          {ORCHESTRATOR_PROVIDERS.map((agent) => (
+          {GOAL_PROVIDERS.map((agent) => (
             <button
               className="button button-small"
               key={agent}
@@ -1095,6 +1099,8 @@ function presetLead(preset: TeamPreset): string {
 }
 
 function NewGoalForm({ sessionId, workspaceId, agentSessionId }: { sessionId: string; workspaceId: string; agentSessionId: string | null }) {
+  const provider = useStore((s) => s.sessions[sessionId]?.snapshot.provider);
+  const supportedSession = canLeadGoal(provider);
   const createOdyssey = useStore((s) => s.createOdyssey);
   const requestPlan = useStore((s) => s.odysseyRequestPlan);
   const setError = useStore((s) => s.setError);
@@ -1112,6 +1118,8 @@ function NewGoalForm({ sessionId, workspaceId, agentSessionId }: { sessionId: st
   const [isolate, setIsolate] = useState(false);
   const [dispatch, setDispatch] = useState<"agent" | "runner">("agent");
   const preset = presets.find((entry) => entry.id === presetId);
+  const supportedPresets = presets.filter((entry) => canLeadGoal(entry.orchestrator.provider));
+  const supportedPreset = !presetId || (preset !== undefined && canLeadGoal(preset.orchestrator.provider));
 
   // The project's test command is a property of the project more than of one
   // goal, so the newest goal in this workspace that had one is the default.
@@ -1135,6 +1143,7 @@ function NewGoalForm({ sessionId, workspaceId, agentSessionId }: { sessionId: st
 
   const readDocument = useCallback(
     async (paths: string[]) => {
+      if (!supportedSession) return;
       const path = paths.find(isPlanDocument);
       if (!path) {
         setError({ code: "UNSUPPORTED", message: t("Drop a Markdown or text file to plan a goal from it."), retry: "user_action" });
@@ -1158,16 +1167,16 @@ function NewGoalForm({ sessionId, workspaceId, agentSessionId }: { sessionId: st
         setError(error);
       }
     },
-    [setError],
+    [setError, supportedSession, workspaceId],
   );
 
   // A document sent here from the transcript plans the goal, as a drop would.
   const sentDoc = useStore((s) => s.bigThingDoc[sessionId]);
   useEffect(() => {
-    if (!sentDoc) return;
+    if (!sentDoc || !supportedSession) return;
     const path = useStore.getState().takeBigThingDoc(sessionId);
     if (path) void readDocument([path]);
-  }, [sentDoc, sessionId, readDocument]);
+  }, [sentDoc, sessionId, readDocument, supportedSession]);
 
   // Tauri hands the webview file paths rather than File objects, so the drop
   // is read natively and this listener only routes it.
@@ -1189,7 +1198,7 @@ function NewGoalForm({ sessionId, workspaceId, agentSessionId }: { sessionId: st
   }, [readDocument]);
 
   const create = async () => {
-    if (!title.trim() || !agentSessionId || creating) return;
+    if (!supportedSession || !supportedPreset || !title.trim() || !agentSessionId || creating) return;
     setCreating(true);
     try {
       await createOdyssey(sessionId, {
@@ -1222,6 +1231,12 @@ function NewGoalForm({ sessionId, workspaceId, agentSessionId }: { sessionId: st
       setCreating(false);
     }
   };
+
+  if (!supportedSession) return (
+    <div className="odyssey-empty">
+      <p role="status">{t("Big Thing needs a session led by Claude Code, Codex or Local Models. Open one of those sessions to set a goal. Gemini can still lead ordinary teams.")}</p>
+    </div>
+  );
 
   return (
     <div className={`odyssey-empty ${dropping ? "drop-target" : ""}`}>
@@ -1305,15 +1320,17 @@ function NewGoalForm({ sessionId, workspaceId, agentSessionId }: { sessionId: st
         <label className="odyssey-field">
           <span className="small">{t("Team")}</span>
           <select aria-label={t("Team")} className="select" onChange={(event) => setPresetId(event.target.value)} value={presetId}>
+            {!supportedPreset && <option disabled value={presetId}>{t("Choose a supported team")}</option>}
             <option value="">{t("This session’s own team")}</option>
-            {presets.map((entry) => (
+            {supportedPresets.map((entry) => (
               <option key={entry.id} value={entry.id}>
                 {entry.name}
               </option>
             ))}
           </select>
+          {!supportedPreset && <span role="status">{t("This team cannot lead a Big Thing run. Choose a supported team or this session's own team.")}</span>}
           <span className="small muted">
-            {preset
+            {preset && supportedPreset
               ? preset.combo.workers.length === 1
                 ? t("Led by {who} with {count} worker. A run on another account moves there when it starts.", { who: presetLead(preset), count: 1 })
                 : t("Led by {who} with {count} workers. A run on another account moves there when it starts.", { who: presetLead(preset), count: preset.combo.workers.length })
@@ -1343,7 +1360,7 @@ function NewGoalForm({ sessionId, workspaceId, agentSessionId }: { sessionId: st
           <span className="small muted">{STOP_HINT[stop]}</span>
         </label>
         <div className="row wrap">
-          <button className="button button-primary" disabled={!title.trim() || !agentSessionId || creating} type="submit">
+          <button className="button button-primary" disabled={!supportedPreset || !title.trim() || !agentSessionId || creating} type="submit">
             {creating ? t("Creating…") : document ? t("Create goal and ask the agent to plan it") : t("Create goal")}
           </button>
           <span className="small muted">

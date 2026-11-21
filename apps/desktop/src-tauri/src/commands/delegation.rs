@@ -111,7 +111,17 @@ pub fn prepare_orchestrator(state: &AppState, key: &str, root: PathBuf, combo: &
             }
             options.developer_instructions = Some(guidance);
         }
-        AgentLaunch::Gemini(_) => {}
+        AgentLaunch::Gemini(options) => {
+            options.native_acp = true;
+            // Native ACP's system-prompt extension has no established payload
+            // contract here. Use an ordinary prompt block instead of guessing.
+            // Do not claim native subagent tools have been disabled.
+            let mut prompt = orchestrator_guidance(false);
+            if withheld {
+                prompt.push_str(" For delegated work, use only the selected team workers through the team tools; do not start native subagents.");
+            }
+            options.initial_prompt_prefix = Some(prompt);
+        }
     }
 }
 

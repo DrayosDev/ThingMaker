@@ -6,9 +6,9 @@
  * command would and asserts what a reader would see — in particular that a
  * milestone the model merely claimed is labelled as a claim.
  */
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { MilestoneRecord, OdysseyView, Snapshot } from "@thingmaker/contracts";
+import type { MilestoneRecord, OdysseyView, Provider, Snapshot, TeamPreset } from "@thingmaker/contracts";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(async () => {
@@ -82,7 +82,7 @@ const view: OdysseyView = {
   journal: [{ id: "j1", odysseyId: "o1", at: 1_700_000_000_000, kind: "wait", summary: "Checkpoint saved before usage reset" }],
 };
 
-function seed(odyssey: OdysseyView | null | undefined, options: { agent?: "codex" | "claude" } = {}) {
+function seed(odyssey: OdysseyView | null | undefined, options: { agent?: Provider } = {}) {
   const handle = { id: SESSION, attachmentGeneration: "1" };
   const snapshot = { handle, agentSessionId: "kw-1", provider: options.agent ?? "codex", process: "ready", attachment: "attached", foreground: "idle" } as unknown as Snapshot;
   const session: LiveSession = {
@@ -104,6 +104,70 @@ function seed(odyssey: OdysseyView | null | undefined, options: { agent?: "codex
 /** The rail became tabs: what used to be always on screen is one click away. */
 const openTab = (name: string) => fireEvent.click(screen.getByRole("tab", { name }));
 const openDetails = () => fireEvent.click(screen.getByRole("button", { name: "details" }));
+
+describe("Big Thing keeps its supported leaders separate from ordinary teams", () => {
+  const original = useStore.getState();
+  const create = vi.fn(async () => undefined);
+  const move = vi.fn(async () => undefined);
+  const preset = (provider: Provider): TeamPreset => ({ id: provider, name: `${provider} team`, orchestrator: { provider }, combo: { workers: [{ name: "Gemini helper", provider: "gemini", capabilities: [] }], nativeSubagents: false }, updatedAt: 1 });
+  beforeEach(() => {
+    create.mockClear();
+    move.mockClear();
+    useStore.setState({ ...original, teamPresets: ["claude", "codex", "local", "gemini"].map((provider) => preset(provider as Provider)), createOdyssey: create, odysseyMoveTo: move });
+  });
+  afterEach(() => { cleanup(); useStore.setState(original); });
+
+  it("explains why a Gemini session cannot create a goal and preserves its pending document", () => {
+    seed(null, { agent: "gemini" });
+    useStore.setState({ bigThingDoc: { [SESSION]: "plan.md" } });
+    render(<OdysseyPane sessionId={SESSION} />);
+    expect(screen.getByRole("status").textContent).toContain("Big Thing needs a session led by Claude Code, Codex or Local Models");
+    expect(screen.queryByRole("button", { name: "Create goal" })).toBeNull();
+    expect(useStore.getState().bigThingDoc[SESSION]).toBe("plan.md");
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it.each(["claude", "codex", "local"] as const)("allows %s goals and supported presets with Gemini helpers", (provider) => {
+    seed(null, { agent: provider });
+    render(<OdysseyPane sessionId={SESSION} />);
+    const teams = screen.getByRole("combobox", { name: "Team" });
+    expect(within(teams).queryByRole("option", { name: "gemini team" })).toBeNull();
+    for (const name of ["claude team", "codex team", "local team"]) expect(within(teams).getByRole("option", { name })).toBeTruthy();
+    fireEvent.change(teams, { target: { value: provider } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Goal title" }), { target: { value: "Ship it" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create goal" }));
+    expect(create).toHaveBeenCalledWith(SESSION, expect.objectContaining({ team: expect.objectContaining({ orchestrator: { provider }, combo: preset(provider).combo }) }));
+  });
+
+  it("rejects submission when a selected preset changes to Gemini, then lets the user choose the session team", () => {
+    seed(null);
+    render(<OdysseyPane sessionId={SESSION} />);
+    fireEvent.change(screen.getByRole("textbox", { name: "Goal title" }), { target: { value: "Ship it" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Team" }), { target: { value: "codex" } });
+    act(() => useStore.setState({ teamPresets: [{ ...preset("gemini"), id: "codex" }] }));
+    const button = screen.getByRole("button", { name: "Create goal" }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    fireEvent.submit(button.closest("form")!);
+    expect(create).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByRole("combobox", { name: "Team" }), { target: { value: "" } });
+    fireEvent.click(button);
+    expect(create).toHaveBeenCalledOnce();
+  });
+
+  it("offers only supported new and existing move targets", () => {
+    seed(view);
+    const current = useStore.getState().sessions[SESSION]!;
+    const targets = Object.fromEntries((["claude", "codex", "local", "gemini"] as const).map((provider) => [provider, { ...current, snapshot: { ...current.snapshot, provider, agentSessionId: `${provider}-target` } }]));
+    useStore.setState({ sessions: { [SESSION]: current, ...targets } });
+    render(<OdysseyPane sessionId={SESSION} />);
+    fireEvent.click(screen.getByRole("button", { name: "move to…" }));
+    const menu = screen.getByRole("group", { name: "Move this run to another session" });
+    expect(within(menu).queryByRole("button", { name: /Gemini/i })).toBeNull();
+    expect(within(menu).getAllByRole("button")).toHaveLength(6);
+    fireEvent.click(within(menu).getByRole("button", { name: /codex-target/ }));
+    expect(move).toHaveBeenCalledWith(SESSION, { kind: "session", sessionId: "codex" });
+  });
+});
 
 describe("the Big Thing screen", () => {
   beforeEach(() => {
@@ -153,7 +217,7 @@ describe("the Big Thing screen", () => {
     seed(view);
     render(<OdysseyPane sessionId={SESSION} />);
     expect(screen.getByText("12 of 50")).toBeTruthy();
-    expect(screen.getByText("84,200 of 200,000")).toBeTruthy();
+    expect(screen.getByText(`${(84_200).toLocaleString()} of ${(200_000).toLocaleString()}`)).toBeTruthy();
   });
 
   it("says where the record lives, and that a check decides verification", () => {

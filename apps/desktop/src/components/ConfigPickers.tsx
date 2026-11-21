@@ -104,6 +104,7 @@ function ProviderSwitch({ sessionId }: { sessionId: string }) {
 function AccountSwitch({ sessionId }: { sessionId: string }) {
   const pending = useStore((s) => s.pendingProvider[sessionId]);
   const own = useStore((s) => s.sessions[sessionId]?.snapshot.provider);
+  const sessionAccount = useStore((s) => s.sessions[sessionId]?.snapshot.accountId);
   const provider = pending?.provider ?? own;
   const accounts = useStore((s) => (provider ? s.accounts[provider] : undefined));
   const loadAccounts = useStore((s) => s.loadAccounts);
@@ -116,10 +117,10 @@ function AccountSwitch({ sessionId }: { sessionId: string }) {
     <div className="model-menu-providers model-menu-accounts" role="group" aria-label={t("Account")}>
       {accounts.map((account) => (
         <button
-          aria-pressed={account.active}
-          className={`model-menu-provider ${account.active ? "model-menu-provider-on" : ""}`}
+          aria-pressed={!pending && sessionAccount ? account.id === sessionAccount : account.active}
+          className={`model-menu-provider ${(!pending && sessionAccount ? account.id === sessionAccount : account.active) ? "model-menu-provider-on" : ""}`}
           key={account.id}
-          onClick={() => !account.active && void setActiveAccount(provider, account.id, pending ? undefined : sessionId)}
+          onClick={() => !(!pending && sessionAccount ? account.id === sessionAccount : account.active) && void setActiveAccount(provider, account.id, pending ? undefined : sessionId)}
           title={account.auth?.account ?? undefined}
           type="button"
         >

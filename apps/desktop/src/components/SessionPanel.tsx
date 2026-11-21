@@ -6,6 +6,7 @@ import { t } from "../i18n";
 import { useStore, isWorkerIn, sessionTitle, type SessionTab } from "../store";
 import { api } from "../ipc";
 import { ConfigPickers } from "./ConfigPickers";
+import { QuotaRecovery } from "./QuotaRecovery";
 import { VoiceInput } from "./VoiceInput";
 import { PendingPrompt } from "./PendingPrompt";
 import { TeamChip } from "./TeamEditor";
@@ -1316,6 +1317,7 @@ export function SessionPanel({ sessionId }: { sessionId: string }) {
         {tab !== "odyssey" && tab !== "ultrareview" && (
         <>
         <QueueStrip active={active} canSteer={canSteer} queue={projection.queue} sessionId={sessionId} />
+        {!isWorker && <QuotaRecovery sessionId={sessionId} />}
         <NestedBanner sessionId={sessionId} />
         <NestedReportsStrip sessionId={sessionId} />
         <div className="composer-card">

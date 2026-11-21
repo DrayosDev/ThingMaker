@@ -80,7 +80,12 @@ impl Provider {
     /// Whether a session on this provider can lead a team: it has to take
     /// the session's own `team` MCP server.
     pub fn can_orchestrate(self) -> bool {
-        !matches!(self, Self::Gemini)
+        true
+    }
+
+    /// Big Thing's policy/schema remains separate from ordinary team leadership.
+    pub fn can_lead_goal(self) -> bool {
+        matches!(self, Self::Claude | Self::Codex | Self::Local)
     }
 
     pub fn as_str(self) -> &'static str {

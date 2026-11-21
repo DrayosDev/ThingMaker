@@ -1,5 +1,8 @@
 /** Spanish for the bigthing strings, keyed by their English text. */
 export const bigthing: Record<string, string> = {
+  "Big Thing needs a session led by Claude Code, Codex or Local Models. Open one of those sessions to set a goal. Gemini can still lead ordinary teams.": "Big Thing necesita una sesión dirigida por Claude Code, Codex o Modelos locales. Abre una de esas sesiones para definir un objetivo. Gemini puede dirigir los equipos normales.",
+  "Choose a supported team": "Elige un equipo compatible",
+  "This team cannot lead a Big Thing run. Choose a supported team or this session's own team.": "Este equipo no puede dirigir una ejecución de Big Thing. Elige un equipo compatible o el equipo propio de esta sesión.",
   // BigThingTeam
   "The orchestrator delegates": "El orquestador delega",
   "Big Thing hands out the tasks": "Big Thing reparte las tareas",

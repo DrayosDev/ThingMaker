@@ -16,6 +16,16 @@ const preset = (name: string, id = name): TeamPreset => ({
 });
 
 describe("exporting teams", () => {
+  it("preserves a Gemini lead and its mixed-provider helpers across export and import", () => {
+    const team = preset("Gemini crew");
+    team.orchestrator = { provider: "gemini", model: "gemini-3.1-pro", effort: "high" };
+    team.combo.workers.push({ name: "reviewer", provider: "claude", model: "sonnet", capabilities: ["review"] });
+    const read = readTeamsFile(exportTeams([team]));
+    const [imported] = importedPresets(read.teams, []);
+    expect(imported?.orchestrator).toEqual(team.orchestrator);
+    expect(imported?.combo).toEqual(team.combo);
+  });
+
   it("round-trips restrictions, distinguishes empty from inherited, and rejects malformed policies", () => {
     const team = preset("Restricted");
     team.combo.workers[0]!.resources = { skills: ["skill:user:art"], mcps: [] };
