@@ -41,6 +41,7 @@ fn fixture(name: &str) -> String {
 struct MockLauncher {
     python: PathBuf,
     codex_flags: Vec<String>,
+    claude_flags: Vec<String>,
     launched: Mutex<Vec<WorkerSpec>>,
     released: Mutex<Vec<String>>,
     /// When set, each revision checks that the service's state is free.
@@ -68,7 +69,9 @@ impl WorkerLauncher for MockLauncher {
         let python = self.python.clone();
         let (target, launch) = match spec.slot.provider {
             Provider::Claude => {
-                let mut options = ClaudeLaunchOptions::new(&spec.root, python.clone(), vec![fixture("mock-claude-acp.py")]);
+                let mut prefix = vec![fixture("mock-claude-acp.py")];
+                prefix.extend(self.claude_flags.iter().cloned());
+                let mut options = ClaudeLaunchOptions::new(&spec.root, python.clone(), prefix);
                 options.model = spec.slot.model.clone();
                 options.permission_mode = PermissionStance::AcceptEdits;
                 (LaunchTarget::executable(python), AgentLaunch::Claude(options))
@@ -122,7 +125,11 @@ fn team() -> Combo {
 type Heard = Arc<Mutex<Vec<JobView>>>;
 
 fn service(codex_flags: &[&str]) -> Option<(Delegation, Arc<MockLauncher>, Heard)> {
-    let launcher = Arc::new(MockLauncher { python: python()?, codex_flags: codex_flags.iter().map(|f| f.to_string()).collect(), launched: Mutex::default(), released: Mutex::default(), probe: Default::default(), revisions_under_lock: Default::default() });
+    service_with_flags(codex_flags, &[])
+}
+
+fn service_with_flags(codex_flags: &[&str], claude_flags: &[&str]) -> Option<(Delegation, Arc<MockLauncher>, Heard)> {
+    let launcher = Arc::new(MockLauncher { python: python()?, claude_flags: claude_flags.iter().map(|f| f.to_string()).collect(), codex_flags: codex_flags.iter().map(|f| f.to_string()).collect(), launched: Mutex::default(), released: Mutex::default(), probe: Default::default(), revisions_under_lock: Default::default() });
     let changes = Arc::new(Mutex::new(Vec::new()));
     let seen = changes.clone();
     let delegation = Delegation::new(launcher.clone(), move |job: &JobView| seen.lock().unwrap().push(job.clone()));
@@ -207,7 +214,7 @@ async fn an_orchestrator_delegates_over_mcp_and_awaits_the_report() {
     writeln!(client.input, "{}", json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).unwrap();
     let id = client.send("tools/list", json!({}));
     let tools = tokio::task::block_in_place(|| client.reply(id));
-    assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 5);
+    assert!(tools["result"]["tools"].as_array().unwrap().iter().any(|tool| tool["name"] == "chat_send"));
 
     let workers = client.call("list_workers", json!({}));
     assert_eq!(workers["structuredContent"]["workers"][0]["name"], "luna");
@@ -505,4 +512,49 @@ async fn local_jobs_take_turns_on_the_one_gpu() {
     assert!(done.iter().all(|job| job.status == JobStatus::Succeeded), "{done:?}");
     assert!(done[1].started_at_unix_ms <= done[0].finished_at_unix_ms.unwrap(), "both were asked for at once");
     delegation.release("lm-o").await;
+}
+
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn chat_steers_an_active_worker_or_waits_for_the_next_turn() {
+    for steer in [true, false] {
+        let flags: &[&str] = if steer { &["--hang"] } else { &["--slow=2", "--no-steer"] };
+        let Some((service, _, _)) = service_with_flags(&[], flags) else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let register = |key: &str| {
+            let token = service.register(key, Provider::Claude, dir.path().into(), team());
+            service.caller_for_token(&token).unwrap()
+        };
+        let lead = register("lead");
+        let foreign = register("other");
+        let worker = service.delegate("lead", DelegateArgs { task:"Read the brief".into(), worker:Some("sonnet".into()), ..Default::default() }).unwrap();
+        tokio::time::timeout(Duration::from_secs(5),async {
+            while service.job("lead",&worker.id).unwrap().status != JobStatus::Running {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+        assert!(service.send_chat(&foreign,&worker.id,"wrong room",None).is_err());
+        assert!(service.send_chat(&lead,&worker.id,"wrong parent",Some(1)).is_err());
+        service.send_chat(&lead,&worker.id,"Which file?",None).unwrap();
+        tokio::time::timeout(Duration::from_secs(10),async {
+            loop {
+                let msg = service.chat_history("lead").pop().unwrap();
+                assert!(msg.error.is_none(), "{:?}",msg.error);
+                if msg.delivered { break }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.unwrap();
+        let jobs = service.jobs("lead");
+        if steer {
+            assert_eq!(jobs.len(),1);
+            assert_eq!(jobs[0].status,JobStatus::Running);
+        } else {
+            assert_eq!(jobs.len(),2);
+            assert_eq!(jobs[0].status,JobStatus::Succeeded);
+            assert_eq!(jobs[1].continues.as_ref(),Some(&worker.id));
+            assert_eq!(jobs[0].agent_session_id,jobs[1].agent_session_id);
+        }
+        assert!(service.chat_history("other").is_empty());
+        service.release("lead").await;
+    }
 }

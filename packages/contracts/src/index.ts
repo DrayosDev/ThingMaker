@@ -1936,6 +1936,7 @@ export const COMMANDS = {
   delegationComboSet: "delegation_combo_set",
   delegationDefaultComboGet: "delegation_default_combo_get",
   delegationDefaultComboSet: "delegation_default_combo_set",
+  delegationChat: "delegation_chat",
   delegationJobs: "delegation_jobs",
   delegationJobCancel: "delegation_job_cancel",
   delegationQuota: "delegation_quota",
@@ -2048,3 +2049,17 @@ export const COMMANDS = {
 
 export type CommandName = (typeof COMMANDS)[keyof typeof COMMANDS];
 
+
+
+export interface TeamChatMessage {
+  id: number;
+  from: string;
+  to: string;
+  fromName: string;
+  toName: string;
+  text: string;
+  replyTo: number | null;
+  sentAt: number;
+  delivered: boolean;
+  error: string | null;
+}

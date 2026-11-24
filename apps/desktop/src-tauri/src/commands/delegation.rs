@@ -118,6 +118,7 @@ pub fn prepare_orchestrator(state: &AppState, key: &str, root: PathBuf, combo: &
 /// After the orchestrator is open: its quota reports feed the router.
 pub fn watch_orchestrator(state: &AppState, actor: &SessionActor) {
     let Some(delegation) = state.delegation.get().cloned() else { return };
+    delegation.attach_chat_lead(actor);
     let mut subscription = actor.subscribe();
     tauri::async_runtime::spawn(async move {
         while let Some(event) = subscription.recv().await {
@@ -170,10 +171,13 @@ impl WorkerLauncher for HostLauncher {
                 .ok_or_else(|| DesktopError::not_ready("the orchestrator's workspace is gone"))?;
             let record = super::workspace::ensure_trusted(&state, record)?;
             let reserved = SessionId::reserve();
-            let (target, mut launch) = super::session::build_launch(&state, &record, spec.slot.provider, spec.slot.model.clone(), spec.slot.effort.clone(), None, reserved.clone())?;
+            let (target, mut launch) = super::session::build_launch(&state, &record, spec.slot.provider, spec.slot.model.clone(), spec.slot.effort.clone(), spec.resume.clone(), reserved.clone())?;
             // Resolved once: the revision recorded is the one this launch used.
             let resolved = super::member_resources::resolve(&state, &spec.root, &spec.slot)?;
             let revision = revision_of(&state, &spec.root, &spec.slot, resolved.as_ref());
+            if spec.resume.is_some() && spec.resume_revision.as_ref() != Some(&revision) {
+                return Err(DesktopError::not_ready("The worker account or resources changed before its conversation could reopen."));
+            }
             let builtin_web = resolved.as_ref().is_some_and(|r| r.builtin_web);
             let resource_files = match resolved {
                 Some(resources) => thingmaker_supervisor::integrations::member_resources::apply_to_launch(resources, &mut launch)?,
@@ -204,6 +208,9 @@ impl WorkerLauncher for HostLauncher {
             let row = state
                 .with_storage(|s| s.session_upsert_with_resources(&record.id, &recorded, SessionOrigin::Desktop, spec.slot.provider, spec.slot.resources.as_ref()))
                 .map_err(storage_error)?;
+            if spec.resume.is_some() {
+                state.with_storage(|s| s.session_set_archive(&row.id, thingmaker_supervisor::storage::workspaces::ArchiveState::Active)).map_err(storage_error)?;
+            }
             if spec.slot.provider == Provider::Local && let Some(model) = &spec.slot.model {
                 let setup = super::session::LocalSessionSetup { model: model.clone(), resources: spec.slot.resources.clone() };
                 state.with_storage(|s| s.setting_set("localSessionSetup", &row.id, &setup)).map_err(storage_error)?;
@@ -212,7 +219,7 @@ impl WorkerLauncher for HostLauncher {
             let parent = state.with_storage(|s| s.session_by_agent_id(&record.id, &parent_agent_id)).ok().flatten();
             let _ = state.with_storage(|s| {
                 s.session_set_parent(&row.id, parent.as_ref().map(|parent| parent.id.as_str()))?;
-                s.session_set_title_overlay(&row.id, Some(&spec.title))
+                if spec.resume.is_some() { Ok(()) } else { s.session_set_title_overlay(&row.id, Some(&spec.title)) }
             });
             super::web::attach(&state, &actor, web);
             state.insert_actor(actor.handle().id.clone(), recorded, actor.clone(), spec.root.clone());
@@ -288,6 +295,11 @@ pub fn delegation_default_combo_set(combo: Combo, state: State<'_, AppState>) ->
     let combo = combo.normalized();
     state.with_storage(|s| s.setting_set(COMBO_KEY, GLOBAL_SCOPE, &combo)).map_err(storage_error)?;
     Ok(combo)
+}
+
+#[tauri::command]
+pub fn delegation_chat(handle: SessionHandle, state: State<'_, AppState>) -> CommandResult<Vec<thingmaker_supervisor::delegation::jobs::chat::Message>> {
+    Ok(delegation(&state)?.chat_history(&handle.id))
 }
 
 /// A live session's jobs, oldest first.

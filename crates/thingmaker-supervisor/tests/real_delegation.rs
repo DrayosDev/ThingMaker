@@ -156,3 +156,57 @@ async fn a_codex_orchestrator_delegates_to_a_claude_worker() {
     let worker = WorkerSlot { name: "sonnet".into(), provider: Provider::Claude, model: Some("sonnet".into()), effort: Some("low".into()), capabilities: vec!["code".into()], note: None, prompt: None, resources: None };
     run(Provider::Codex, worker).await;
 }
+
+
+/// Two real workers use their own MCP tokens. Only the recipient sees the
+/// random word, in its first turn before the idle reaper closes its process.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "uses two real Codex agents"]
+async fn chat_reopens_the_original_conversation() {
+    use thingmaker_supervisor::delegation::jobs::DelegateArgs;
+    struct ChatLauncher(PathBuf);
+    impl WorkerLauncher for ChatLauncher {
+        fn launch(&self, spec: WorkerSpec) -> BoxFuture<Result<SessionActor, DesktopError>> {
+            let (target, mut agent) = launch(Provider::Codex, &spec.root, spec.slot.model.clone(), Some("low".into()));
+            let AgentLaunch::Codex(options) = &mut agent else { unreachable!() };
+            options.permission_mode = PermissionStance::AcceptEdits;
+            options.resources = Some(Default::default());
+            options.resume = spec.resume;
+            let mut config = SessionActorConfig::new(target, agent);
+            config.mcp_servers = vec![server_entry(std::path::Path::new(env!("CARGO_BIN_EXE_thingmaker-mcp")), &[], &self.0, spec.mcp_token.as_deref().unwrap())];
+            Box::pin(async move { SessionActor::open(config).await })
+        }
+        fn released(&self, _: &str) {}
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("chat.sock");
+    let service = Delegation::new(Arc::new(ChatLauncher(path.clone())), |job| eprintln!("{} {:?} {:?}", job.id, job.status, job.error));
+    let _socket = DelegationSocket::bind(service.clone(), path).unwrap();
+    let slot = |name: &str| WorkerSlot { name: name.into(), provider: Provider::Codex, model: None, effort: Some("low".into()), capabilities: vec![], note: None, prompt: None, resources: None };
+    let team = "real-chat";
+    service.register(team, Provider::Codex, dir.path().into(), Combo { workers: vec![slot("Keeper"),slot("Asker")], native_subagents: false });
+    let word = uuid::Uuid::new_v4().simple().to_string();
+    let keeper = service.delegate(team, DelegateArgs { worker: Some("Keeper".into()), task:format!("Remember this private code in this conversation only: {word}. Reply READY now. Never write a file or use shell. Later, if another team member asks for the code, reply with it through chat_send."), ..Default::default() }).unwrap();
+    let done = service.await_jobs(team, &[keeper.id.clone()], Duration::from_secs(100), false).await.unwrap();
+    assert_eq!(done[0].status, JobStatus::Succeeded, "{done:?}");
+    let original = done[0].agent_session_id.clone().unwrap();
+    service.set_worker_idle(Duration::ZERO);
+    service.reap_idle().await;
+    service.set_worker_idle(Duration::from_secs(300));
+    assert!(service.job(team,&keeper.id).unwrap().worker_closed);
+    let asker = service.delegate(team, DelegateArgs { worker: Some("Asker".into()), task:format!("Use the team chat_send tool now. Address: {}. Ask for the private code remembered earlier. Do not inspect files or use shell. After sending, finish this turn. If you later receive the reply just finish; do not send an acknowledgement.",keeper.id), ..Default::default() }).unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(150);
+    loop {
+        let history = service.chat_history(team);
+        assert!(history.iter().all(|m| m.error.is_none()), "delivery error: {:?}", history.iter().filter_map(|m| m.error.as_ref()).collect::<Vec<_>>());
+        if history.iter().any(|m| m.delivered && m.from == keeper.id && m.to == asker.id && m.reply_to == Some(1) && m.text.contains(&word)) {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "no contextual reply; messages: {:?}, jobs: {:?}", history.iter().map(|m| (&m.from,&m.to,m.delivered)).collect::<Vec<_>>(),service.jobs(team).iter().map(|j| (&j.worker,j.status,&j.error,&j.result)).collect::<Vec<_>>());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(service.jobs(team).iter().any(|j| j.continues.as_ref()==Some(&keeper.id) && j.agent_session_id.as_ref()==Some(&original)));
+    let jobs = service.await_jobs(team, &[], Duration::from_secs(60), false).await.unwrap();
+    assert!(jobs.iter().all(|j| j.status == JobStatus::Succeeded), "{jobs:?}");
+    service.release(team).await;
+}
