@@ -1,4 +1,6 @@
 import type { MemberMcpDependency, MemberResourceCatalog, MemberResourceEntry, MemberResourceSelection } from "@thingmaker/contracts";
+import type { CatalogEntry } from "./ipc";
+import { t } from "./i18n";
 
 export type SkillConnection = MemberMcpDependency & { skills: string[]; candidates: MemberResourceEntry[] };
 
@@ -34,4 +36,35 @@ export function unambiguousMcps(rows: SkillConnection[], selection: MemberResour
     .map((row) => row.candidates.filter((entry) => entry.available)).filter((entries) => entries.length === 1).map((entries) => entries[0]!);
   return [...new Set(targets.filter((target) => !targets.some((other) => other.id !== target.id && other.name === target.name)
     && !catalog.entries.some((entry) => entry.kind === "mcp" && entry.name === target.name && entry.id !== target.id && selection.mcps.includes(entry.id))).map((entry) => entry.id))];
+}
+
+/** How a catalog group reads in the selector. */
+export function resourceGroupLabel(group: string): string {
+  if (group === "builtin" || group === "thingmaker") return "ThingMaker";
+  if (group === "user") return t("Local · user");
+  if (group === "project") return t("Local · project");
+  return `${t("Plugin")} · ${group.slice(7)}`;
+}
+
+/** Skills reached from the explicit selection through `skillDependencies`
+ * (transitively, available skills only), each mapped to the explicit skills
+ * that pull it in. Explicit skills are never listed: the stored selection holds
+ * only what the person ticked, and these are derived again on every change. */
+export function impliedSkills(entries: CatalogEntry[], explicit: string[]): Map<string, string[]> {
+  const skills = new Map(entries.filter((entry) => entry.kind === "skill").map((entry) => [entry.id, entry]));
+  const chosen = new Set(explicit);
+  const implied = new Map<string, string[]>();
+  for (const root of explicit) {
+    const seen = new Set([root]);
+    const pending = [...(skills.get(root)?.skillDependencies ?? [])];
+    while (pending.length > 0) {
+      const id = pending.pop()!;
+      const entry = skills.get(id);
+      if (seen.has(id) || !entry?.available) continue;
+      seen.add(id);
+      if (!chosen.has(id)) implied.set(id, [...(implied.get(id) ?? []), root]);
+      pending.push(...(entry.skillDependencies ?? []));
+    }
+  }
+  return implied;
 }

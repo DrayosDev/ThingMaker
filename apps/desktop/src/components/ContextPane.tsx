@@ -8,10 +8,10 @@
  * claim about what is "in context" right now.
  */
 import { useEffect, useState, type ReactNode } from "react";
-import type { ContextBundle, ContextSources, Mention, TranscriptUsage } from "@thingmaker/contracts";
+import type { ContextBundle, Mention, TranscriptUsage } from "@thingmaker/contracts";
 import { PROVIDER_LABELS } from "@thingmaker/contracts";
 import { t } from "../i18n";
-import { api } from "../ipc";
+import { api, type SkillSources } from "../ipc";
 import { useStore, windowDelta as windowDeltaOf } from "../store";
 import { cacheEfficiency, percent } from "../usage";
 import { UsageLine, signed, windowName } from "./UsageLine";
@@ -52,7 +52,7 @@ export function ContextPane({ sessionId }: { sessionId: string }) {
   const provider = session?.snapshot.provider ?? "claude";
   const account = useStore((s) => s.usage[provider] ?? null);
   const quota = useStore((s) => s.quotas[provider]);
-  const [sources, setSources] = useState<ContextSources | null>(null);
+  const [sources, setSources] = useState<SkillSources | null>(null);
   const [name, setName] = useState("");
   const [usage, setUsage] = useState<TranscriptUsage | null>(null);
   const [usageError, setUsageError] = useState<string | null>(null);

@@ -1,5 +1,5 @@
 import type { MemberResourceCatalog, MemberResourceSelection } from "@thingmaker/contracts";
-import { activateMcp, skillConnections, unambiguousMcps } from "../memberResourceDependencies";
+import { activateMcp, resourceGroupLabel, skillConnections, unambiguousMcps } from "../memberResourceDependencies";
 import { t } from "../i18n";
 import { useStore } from "../store";
 
@@ -27,7 +27,7 @@ export function SkillConnections({ catalog, selection, onChange }: { catalog: Me
           <input type="checkbox" aria-label={t("Activate {connection} for {dependency}", { connection: `${entry.name} · ${entry.group} · ${entry.source ?? ""}`, dependency: row.name })}
             checked={selection.mcps.includes(entry.id)} disabled={!entry.available && !selection.mcps.includes(entry.id)}
             onChange={(event) => onChange(event.target.checked ? activateMcp(catalog, selection, entry.id) : { ...selection, mcps: selection.mcps.filter((id) => id !== entry.id) })} />
-          <span><strong>{entry.name}</strong><span className="small muted">{entry.group === "builtin" ? "ThingMaker" : entry.group === "user" ? t("Local · user") : entry.group === "project" ? t("Local · project") : `${t("Plugin")} · ${entry.group.slice(7)}`} · {entry.source}{entry.target ? ` · ${entry.target}` : ""}</span>{entry.problem && <span className="small muted">{entry.problem}</span>}</span>
+          <span><strong>{entry.name}</strong><span className="small muted">{resourceGroupLabel(entry.group)} · {entry.source}{entry.target ? ` · ${entry.target}` : ""}</span>{entry.problem && <span className="small muted">{entry.problem}</span>}</span>
         </label>)}
       </div>;
     })}

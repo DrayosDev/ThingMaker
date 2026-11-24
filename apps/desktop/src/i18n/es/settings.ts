@@ -336,6 +336,8 @@ export const settings: Record<string, string> = {
   "Install into": "Instalar en",
   "this workspace (.agents/skills)": "este espacio de trabajo (.agents/skills)",
   "your user (~/.agents/skills)": "tu usuario (~/.agents/skills)",
+  "ThingMaker (~/.thingmaker/skills)": "ThingMaker (~/.thingmaker/skills)",
+  "Available to every agent through ThingMaker's selector": "Disponible para todos los agentes desde el selector de ThingMaker",
   "already exists in the {scope} root": "ya existe en la raíz de {scope}",
   "will shadow the {scope} skill with the same name": "ocultará la skill de {scope} con el mismo nombre",
   "shadowed by the {scope} skill with the same name": "oculta por la skill de {scope} con el mismo nombre",

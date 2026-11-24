@@ -9,8 +9,12 @@ use crate::{DesktopError, storage::content_hash};
 
 #[cfg(windows)]
 mod windows_stdio;
+mod imported;
 mod plugins;
 mod skill_dependencies;
+mod skill_links;
+pub use imported::{ImportStatus, PROVIDERS as IMPORT_PROVIDERS, root as imports_root, setup as setup_import};
+pub use skill_links::expand_skills;
 pub use skill_dependencies::McpDependency;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,7 +26,7 @@ pub struct ResourceSelection {
     pub mcps: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResourceEntry {
     pub id: String,
@@ -38,6 +42,10 @@ pub struct ResourceEntry {
     pub target: Option<String>,
     pub mcp_dependencies: Vec<McpDependency>,
     pub dependency_notes: Vec<String>,
+    /// Ids of the skills this skill refers to (direct only; see `skill_links`).
+    pub skill_dependencies: Vec<String>,
+    /// Whose skill or server this is: claude, codex, gemini or thingmaker.
+    pub provider: Option<String>,
     #[serde(skip)]
     runtime_name: String,
     #[serde(skip)]
@@ -48,6 +56,13 @@ pub struct ResourceEntry {
     skill_path: Option<PathBuf>,
     #[serde(skip)]
     bridge_skill: bool,
+    /// The plugin a skill came from, by its short name.
+    #[serde(skip)]
+    plugin: Option<String>,
+    /// What an import copies to keep a skill working: its plugin's root, or
+    /// the skill's own folder.
+    #[serde(skip)]
+    unit_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize)]
@@ -55,6 +70,8 @@ pub struct ResourceEntry {
 pub struct ResourceCatalog {
     pub entries: Vec<ResourceEntry>,
     pub notes: Vec<String>,
+    /// Which providers' skills are imported copies.
+    pub imports: Vec<ImportStatus>,
     #[serde(skip)]
     local_only: bool,
 }
@@ -130,7 +147,7 @@ fn add_skills(out: &mut Vec<ResourceEntry>, directory: &Path, group: &str, prefi
             description: description(&text, front.description), group: group.into(), available: enabled && !disabled,
             problem: if !enabled { Some("Plugin disabled for this project".into()) } else { disabled.then(|| "Manual-only or forked skill; not supported by the member pilot".into()) }, runtime_name, config: Value::Null,
             revision: format!("{}:{revision}", file.display()), source: if plugin.is_some() { "plugin".into() } else { ".claude/skills".into() },
-            skill_path: Some(file), bridge_skill: false, target: None, mcp_dependencies: Vec::new(), dependency_notes: Vec::new() });
+            plugin: plugin.map(str::to_string), unit_root: Some(directory.clone()), skill_path: Some(file), ..Default::default() });
     }
 }
 
@@ -150,7 +167,7 @@ fn add_mcps(out: &mut Vec<ResourceEntry>, value: &Value, group: &str, prefix: &s
             // public catalog: only the program or the host, in `target`.
             description: "MCP server".into(), group: group.into(), available, target: server_target(&config),
             problem: (!available).then(|| "Server disabled or unsupported transport".into()), runtime_name,
-            revision: content_hash(serde_json::to_string(&config).unwrap_or_default().as_bytes()), config, source: if plugin.is_some() { "plugin".into() } else { ".claude".into() }, skill_path: None, bridge_skill: false, mcp_dependencies: Vec::new(), dependency_notes: Vec::new() });
+            revision: content_hash(serde_json::to_string(&config).unwrap_or_default().as_bytes()), config, source: if plugin.is_some() { "plugin".into() } else { ".claude".into() }, ..Default::default() });
     }
 }
 
@@ -246,6 +263,7 @@ fn add_codex_mcps(out: &mut Vec<ResourceEntry>, file: &Path, group: &str, prefix
 /// One plugin's skills and MCP servers: its default `skills/` folder and
 /// `.mcp.json`, plus whatever its manifest lists.
 fn add_plugin(out: &mut Vec<ResourceEntry>, path: &Path, manifest: &Value, id: &str, group: &str, name: &str, enabled: bool) -> Result<(), DesktopError> {
+    let start = out.len();
     if path.join("SKILL.md").is_file() { add_skills(out, path, group, id, Some(name), enabled); }
     add_skills(out, &path.join("skills"), group, id, Some(name), enabled);
     if let Some(paths) = manifest.get("skills") {
@@ -262,6 +280,8 @@ fn add_plugin(out: &mut Vec<ResourceEntry>, path: &Path, manifest: &Value, id: &
             }
         }
     }
+    // Plugin skills reach shared files through the plugin's root.
+    for entry in out[start..].iter_mut().filter(|entry| entry.kind == "skill") { entry.unit_root = Some(path.to_path_buf()); }
     Ok(())
 }
 
@@ -315,6 +335,8 @@ pub fn catalog_with_homes(home: &Path, config_dir: &Path, codex_home: &Path, roo
     add_external_skills(&mut entries, &home.join(".agents/skills"), "user", "agents-user", ".agents/skills");
     add_external_skills(&mut entries, &codex_home.join("skills"), "user", "codex-user", ".codex/skills");
     add_external_skills(&mut entries, &codex_home.join("skills/.system"), "user", "codex-system", ".codex/skills/.system");
+    add_external_skills(&mut entries, &home.join(".gemini/skills"), "user", "gemini-user", ".gemini/skills");
+    add_external_skills(&mut entries, &thingmaker_skills_root(home), "thingmaker", "thingmaker", "ThingMaker");
     add_mcps(&mut entries, &settings["mcpServers"], "user", "user", None, true, None);
     add_codex_mcps(&mut entries, &codex_home.join("config.toml"), "user", "codex-user")?;
     for directory in &project_dirs {
@@ -360,6 +382,8 @@ pub fn catalog_with_homes(home: &Path, config_dir: &Path, codex_home: &Path, roo
     }
     plugins::add_synced_claude_plugins(&mut entries, &config_dir.join("plugins/synced"));
     plugins::add_codex_plugins(&mut entries, codex_home);
+    for entry in &mut entries { entry.provider = provider_of(&entry.source).map(str::to_string); }
+    let imports = imported::apply(&mut entries, &imported::root(home));
     // Later native definitions have precedence. A hidden duplicate cannot be
     // selected by origin when Claude itself resolves both by the same name.
     // The same manifest can explicitly list its default directories/files.
@@ -375,8 +399,15 @@ pub fn catalog_with_homes(home: &Path, config_dir: &Path, codex_home: &Path, roo
             if !user_skill_wins { winners.insert(key, index); }
         }
     }
+    // ThingMaker's own skills are also installed where agents read them
+    // natively (`big-thing` in ~/.agents/skills); list each one once.
+    let own: Vec<Vec<u8>> = entries.iter().filter(|entry| entry.group == "thingmaker").filter_map(|entry| entry.skill_path.as_ref().and_then(|path| std::fs::read(path).ok())).collect();
     for (index, entry) in entries.iter_mut().enumerate() {
-        if entry.kind == "skill" && !entry.bridge_skill && !entry.group.starts_with("plugin:") && skill_overrides.get(&entry.runtime_name).is_some_and(|mode| mode == "off" || mode == "user-invocable-only") {
+        if entry.kind == "skill" && entry.group != "thingmaker" && entry.available && entry.skill_path.as_ref().and_then(|path| std::fs::read(path).ok()).is_some_and(|bytes| own.contains(&bytes)) {
+            entry.available = false;
+            entry.problem = Some("Same skill as ThingMaker's own copy".into());
+        } else if entry.kind == "skill" && !entry.group.starts_with("plugin:") && matches!(entry.source.as_str(), ".claude/skills" | "imported-skills/claude")
+            && skill_overrides.get(&entry.name).is_some_and(|mode| mode == "off" || mode == "user-invocable-only") {
             entry.available = false;
             entry.problem = Some("Skill disabled for model invocation in Claude settings".into());
         } else if entry.kind == "mcp" && !entry.source.starts_with(".codex/config") && disabled_mcps.contains(&entry.runtime_name) {
@@ -394,15 +425,32 @@ pub fn catalog_with_homes(home: &Path, config_dir: &Path, codex_home: &Path, roo
             group: "builtin".into(), available: true, problem: None, source: "ThingMaker".into(),
             target: None, mcp_dependencies: vec![], dependency_notes: vec![],
             runtime_name: "thingmaker-web".into(), config: Value::Null, revision: "1".into(),
-            skill_path: None, bridge_skill: false,
+            provider: Some("thingmaker".into()), ..Default::default()
         });
     }
     entries.sort_by(|a, b| a.id.cmp(&b.id));
     skill_dependencies::annotate(&mut entries);
-    Ok(ResourceCatalog { entries, local_only: false, notes: vec![
-        "Shared skills: .claude, .agents and .codex folders, plus installed Claude plugins, plugins synced from claude.ai and enabled Codex plugins. Legacy commands, enterprise/synced skills and cloud connectors are not listed. Skills may depend on tools or syntax specific to their original harness.".into(),
+    skill_links::annotate(&mut entries);
+    Ok(ResourceCatalog { entries, local_only: false, imports, notes: vec![
+        "Shared skills: .claude, .agents, .codex and .gemini folders, ThingMaker's own skills, installed Claude plugins, plugins synced from claude.ai and enabled Codex plugins. Imported providers list their copies under ~/.thingmaker/imported-skills instead. Legacy commands, enterprise/synced skills and cloud connectors are not listed. Skills may depend on tools or syntax specific to their original harness.".into(),
         "Selection controls model-invoked skills and MCP servers. File access, slash commands, plugin hooks and managed policies are separate.".into(),
     ] })
+}
+
+/// Skills installed for ThingMaker itself, selectable by any agent.
+pub fn thingmaker_skills_root(home: &Path) -> PathBuf {
+    home.join(".thingmaker").join("skills")
+}
+
+/// Whose resource an origin is. `.agents/skills` is read natively by Codex.
+fn provider_of(source: &str) -> Option<&'static str> {
+    match source {
+        ".claude/skills" | ".claude" | "plugin" | ".claude/plugins/synced" => Some("claude"),
+        ".agents/skills" | ".codex/skills" | ".codex/skills/.system" | ".codex/config.toml" | ".codex/plugins" => Some("codex"),
+        ".gemini/skills" => Some("gemini"),
+        "ThingMaker" => Some("thingmaker"),
+        _ => None,
+    }
 }
 
 pub const BUILTIN_WEB: &str = "mcp:builtin:thingmaker-web";
@@ -623,7 +671,9 @@ pub fn resolve(catalog: &ResourceCatalog, selection: &ResourceSelection, environ
             }
         }
     }
-    for (kind, ids) in [("skill", &selection.skills), ("mcp", &selection.mcps)] {
+    // Skills the selection refers to come along; only explicit ones are saved.
+    let skill_ids = expand_skills(catalog, &selection.skills);
+    for (kind, ids) in [("skill", &skill_ids), ("mcp", &selection.mcps)] {
         for id in ids {
             if !WEB_SUPPORTED && kind == "mcp" && id == BUILTIN_WEB { continue; }
             let entry = catalog.entries.iter().find(|entry| entry.id == *id && entry.kind == kind && entry.available)

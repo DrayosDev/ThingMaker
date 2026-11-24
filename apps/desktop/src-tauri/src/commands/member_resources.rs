@@ -16,8 +16,22 @@ pub struct CatalogView {
     problem: Option<String>,
 }
 
+/// Skills shipped inside ThingMaker, kept current in its own skills folder so
+/// every agent's selector offers them. They are the app's: a changed copy is
+/// replaced by the shipped one.
+const BUNDLED_SKILLS: [(&str, &str); 1] = [("big-thing", super::odyssey::SKILL_MD)];
+
+fn ensure_bundled_skills(home: &Path) {
+    for (name, text) in BUNDLED_SKILLS {
+        let file = member_resources::thingmaker_skills_root(home).join(name).join("SKILL.md");
+        if std::fs::read_to_string(&file).is_ok_and(|existing| existing == text) { continue }
+        let _ = file.parent().map(std::fs::create_dir_all).transpose().and_then(|_| std::fs::write(&file, text));
+    }
+}
+
 fn catalog_for(state: &AppState, root: Option<&Path>) -> CommandResult<ResourceCatalog> {
     let home = state.home.as_deref().ok_or_else(|| DesktopError::not_ready("HOME is not set"))?;
+    ensure_bundled_skills(home);
     let folder = state.try_account_folder(Provider::Claude, None)?.or_else(|| accounts::main_folder(Provider::Claude, home))
         .ok_or_else(|| DesktopError::not_ready("Claude account folder is unavailable"))?;
     let codex_folder = state.try_account_folder(Provider::Codex, None)?.or_else(|| accounts::main_folder(Provider::Codex, home))
@@ -72,6 +86,16 @@ pub fn member_resources_catalog(workspace_id: Option<String>, provider: Provider
         local_catalog(&state, catalog, root.as_deref(), provider, &env)
     } else { catalog };
     Ok(CatalogView { catalog, problem: check_harness(&state, provider).err().map(|error| error.message) })
+}
+
+/// Starts importing a provider's skills into ~/.thingmaker/imported-skills and
+/// runs the first sync; later catalog builds keep the copies current.
+#[tauri::command]
+pub fn imported_skills_setup(provider: String, state: State<'_, AppState>) -> CommandResult<member_resources::ImportStatus> {
+    let home = state.home.as_deref().ok_or_else(|| DesktopError::not_ready("HOME is not set"))?;
+    member_resources::setup_import(&member_resources::imports_root(home), &provider)?;
+    catalog_for(&state, None)?.imports.into_iter().find(|status| status.provider == provider)
+        .ok_or_else(|| DesktopError::unsupported("Skills cannot be imported from this provider"))
 }
 
 pub fn resolve(state: &AppState, root: &Path, slot: &WorkerSlot) -> CommandResult<Option<ResolvedResources>> {

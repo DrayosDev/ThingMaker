@@ -3,8 +3,8 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { MemberResourceCatalog, WorkerSlot } from "@thingmaker/contracts";
 
-vi.mock("./ipc", () => ({ api: { memberResources: vi.fn() } }));
-import { api } from "./ipc";
+vi.mock("./ipc", () => ({ api: { memberResources: vi.fn(), importedSkillsSetup: vi.fn() } }));
+import { api, type CatalogEntry } from "./ipc";
 import { MemberResources } from "./components/MemberResources";
 import { useStore } from "./store";
 
@@ -165,4 +165,75 @@ it("points a missing connection to Settings › Integrations", async () => {
   const dependencies = await screen.findByRole("region", { name: "Connections for selected skills" });
   fireEvent.click(within(dependencies).getByRole("button", { name: "Open integration configuration" }));
   expect(useStore.getState().view).toEqual({ kind: "settings", tab: "integrations" });
+});
+
+const skill = (name: string, skillDependencies: string[] = [], available = true): CatalogEntry =>
+  ({ id: `skill:user:${name}`, name, kind: "skill", description: name, group: "user", available, problem: null, skillDependencies });
+const box = (name: string) => screen.getByRole("checkbox", { name }) as HTMLInputElement;
+
+it("shows skills pulled in by an explicit pick as included, without storing them", async () => {
+  vi.mocked(api.memberResources).mockResolvedValue({ ...catalog, entries: [
+    skill("plan", ["skill:user:write", "skill:user:off"]), skill("write", ["skill:user:spell"]), skill("spell"), skill("off", [], false),
+  ] });
+  render(<Editor worker={{ ...initial, resources: { skills: ["skill:user:plan"], mcps: [] } }} />);
+  await screen.findByRole("checkbox", { name: "plan" });
+  expect(box("write").checked && box("write").disabled).toBe(true);
+  expect(box("spell").checked && box("spell").disabled, "the closure is transitive").toBe(true);
+  expect(screen.getAllByText(/^Included by plan/)).toHaveLength(2);
+  expect(box("off").checked, "an unavailable dependency is not included").toBe(false);
+  expect(screen.getByText("Uses write, off")).toBeTruthy();
+  expect(screen.getByRole("button", { name: /Skills · 3/ })).toBeTruthy();
+  expect(latest.resources?.skills).toEqual(["skill:user:plan"]);
+});
+
+it("drops dependencies with their explicit skill unless another pick still needs them", async () => {
+  vi.mocked(api.memberResources).mockResolvedValue({ ...catalog, entries: [
+    skill("plan", ["skill:user:write", "skill:user:spell"]), skill("review", ["skill:user:spell"]), skill("write"), skill("spell"),
+  ] });
+  render(<Editor worker={{ ...initial, resources: { skills: ["skill:user:plan", "skill:user:review"], mcps: [] } }} />);
+  await screen.findByRole("checkbox", { name: "plan" });
+  expect(screen.getByText(/^Included by plan, review/)).toBeTruthy();
+  fireEvent.click(box("plan"));
+  expect(latest.resources?.skills).toEqual(["skill:user:review"]);
+  expect(box("write").checked || box("write").disabled).toBe(false);
+  expect(box("spell").checked && box("spell").disabled, "still needed by review").toBe(true);
+  expect(screen.getByText(/^Included by review/)).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Keep selected" }));
+  expect(latest.resources?.skills).toEqual(["skill:user:review", "skill:user:spell"]);
+  fireEvent.click(box("review"));
+  expect(box("spell").checked && !box("spell").disabled, "a skill the person ticked survives").toBe(true);
+  fireEvent.click(screen.getByRole("button", { name: "Select group" }));
+  expect(latest.resources?.skills).toEqual(["skill:user:spell", "skill:user:plan", "skill:user:review", "skill:user:write"]);
+  fireEvent.click(screen.getByRole("button", { name: "Deselect group" }));
+  expect(latest.resources?.skills).toEqual([]);
+});
+
+it("sets up a provider's imported skills and reloads the catalog", async () => {
+  vi.mocked(api.memberResources).mockResolvedValue({ ...catalog, imports: [
+    { provider: "claude", imported: false, skills: 0, syncedAt: null, problem: null },
+    { provider: "codex", imported: true, skills: 4, syncedAt: 1_700_000_000_000, problem: "2 skills could not be copied" },
+  ] });
+  vi.mocked(api.importedSkillsSetup).mockReset().mockResolvedValue({ provider: "claude", imported: true, skills: 3, syncedAt: 1_700_000_000_000, problem: null });
+  render(<Editor worker={{ ...initial, resources: { skills: [], mcps: [] } }} />);
+  const claude = await screen.findByRole("group", { name: "Claude Code" });
+  const codex = screen.getByRole("group", { name: "Codex" });
+  expect(within(claude).getByText("Not set up")).toBeTruthy();
+  expect(within(codex).getByText(/4 skills imported/)).toBeTruthy();
+  expect(within(codex).getByRole("alert").textContent).toBe("2 skills could not be copied");
+  expect(within(screen.getByRole("group", { name: "Gemini" })).getByRole("button", { name: "Set up" })).toBeTruthy();
+  expect(api.memberResources).toHaveBeenCalledTimes(1);
+  fireEvent.click(within(claude).getByRole("button", { name: "Set up" }));
+  expect(api.importedSkillsSetup).toHaveBeenCalledWith("claude");
+  await waitFor(() => expect(api.memberResources).toHaveBeenCalledTimes(2));
+  expect(within(await screen.findByRole("group", { name: "Codex" })).getByRole("button", { name: "Re-import" })).toBeTruthy();
+});
+
+it("reports a failed import on its provider", async () => {
+  vi.mocked(api.memberResources).mockResolvedValue({ ...catalog, imports: [] });
+  vi.mocked(api.importedSkillsSetup).mockReset().mockRejectedValue({ message: "Gemini is not installed" });
+  render(<Editor worker={{ ...initial, resources: { skills: [], mcps: [] } }} />);
+  const gemini = await screen.findByRole("group", { name: "Gemini" });
+  fireEvent.click(within(gemini).getByRole("button", { name: "Set up" }));
+  expect((await within(gemini).findByRole("alert")).textContent).toBe("Gemini is not installed");
+  expect(api.memberResources).toHaveBeenCalledTimes(1);
 });

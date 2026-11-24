@@ -145,7 +145,25 @@ import {
   type ProviderModel,
   type QuotaSnapshot,
 } from "@thingmaker/contracts";
+import type { MemberResourceEntry, SkillEntry } from "@thingmaker/contracts";
 import { t } from "./i18n";
+
+// Imported provider skills and ThingMaker-level skills. These widen the shared
+// contracts with what the backend now sends; fold them into @thingmaker/contracts
+// once that package is updated.
+/** A provider whose skills can be copied into `~/.thingmaker/imported-skills/<provider>`. */
+export type ImportedSkillsProvider = "claude" | "codex" | "gemini";
+/** Once `imported`, the catalog lists the copies instead of the provider's own skills. `syncedAt` is unix ms. */
+export type ImportedSkillsStatus = { provider: ImportedSkillsProvider; imported: boolean; skills: number; syncedAt: number | null; problem: string | null };
+/** `skillDependencies` holds the ids of the skills this one references (direct only). */
+export type CatalogEntry = MemberResourceEntry & { skillDependencies?: string[]; provider?: ImportedSkillsProvider | "thingmaker" | null };
+export type ResourceCatalog = Omit<MemberResourceCatalog, "entries"> & { entries: CatalogEntry[]; imports?: ImportedSkillsStatus[] };
+/** `thingmaker` is `~/.thingmaker/skills`, offered to every agent through the member selector; it ignores the workspace. */
+export type AnySkillScope = SkillScope | "thingmaker";
+export type SkillTarget = ConfigTarget | { kind: "skill"; scope: "thingmaker"; workspaceId: null; directoryName: string };
+export type SkillSource = Omit<SkillEntry, "scope" | "shadows"> & { scope: AnySkillScope; shadows?: AnySkillScope };
+export type SkillSources = Omit<ContextSources, "skills"> & { skills: SkillSource[] };
+const IMPORTED_SKILLS_SETUP = "imported_skills_setup";
 
 function toDesktopError(error: unknown): DesktopError {
   if (isDesktopError(error)) return error;
@@ -275,25 +293,27 @@ export const api = {
   terminalClose: (id: string) => call<void>(COMMANDS.terminalClose, { id }),
   terminalExport: (id: string) => call<string>(COMMANDS.terminalExport, { id }),
   saveTextFile: (suggestedName: string, content: string) => call<string | null>(COMMANDS.saveTextFile, { request: { suggestedName, content } }),
-  contextSources: (workspaceId: string) => call<ContextSources>(COMMANDS.contextSources, { workspaceId }),
-  configReadFile: (target: ConfigTarget) => call<ConfigFile>(COMMANDS.configReadFile, { target }),
-  configWriteFile: (target: ConfigTarget, expectedHash: string | null, content: string) =>
+  contextSources: (workspaceId: string) => call<SkillSources>(COMMANDS.contextSources, { workspaceId }),
+  configReadFile: (target: SkillTarget) => call<ConfigFile>(COMMANDS.configReadFile, { target }),
+  configWriteFile: (target: SkillTarget, expectedHash: string | null, content: string) =>
     call<ConfigWriteOutcome>(COMMANDS.configWriteFile, { request: { target, expectedHash, content } }),
-  skillCreate: (scope: SkillScope, workspaceId: string | null, directoryName: string) =>
+  skillCreate: (scope: AnySkillScope, workspaceId: string | null, directoryName: string) =>
     call<ConfigFile>(COMMANDS.skillCreate, { request: { scope, workspaceId, directoryName } }),
-  skillImportPick: (kind: "folder" | "zip", scope: SkillScope, workspaceId: string | null) =>
+  skillImportPick: (kind: "folder" | "zip", scope: AnySkillScope, workspaceId: string | null) =>
     call<ImportPlan | null>(COMMANDS.skillImportPick, { request: { kind, scope, workspaceId } }),
-  skillImportFromPaths: (paths: string[], scope: SkillScope, workspaceId: string | null) =>
+  skillImportFromPaths: (paths: string[], scope: AnySkillScope, workspaceId: string | null) =>
     call<ImportPlan | null>(COMMANDS.skillImportFromPaths, { request: { paths, scope, workspaceId } }),
-  skillImportAnnotate: (stagingId: string, scope: SkillScope, workspaceId: string | null) =>
+  skillImportAnnotate: (stagingId: string, scope: AnySkillScope, workspaceId: string | null) =>
     call<ImportPlan>(COMMANDS.skillImportAnnotate, { request: { stagingId, scope, workspaceId } }),
-  skillImportApply: (stagingId: string, selected: string[], scope: SkillScope, workspaceId: string | null, replace: boolean) =>
+  skillImportApply: (stagingId: string, selected: string[], scope: AnySkillScope, workspaceId: string | null, replace: boolean) =>
     call<AppliedSkill[]>(COMMANDS.skillImportApply, { request: { stagingId, selected, scope, workspaceId, replace } }),
   skillImportDiscard: (stagingId: string) => call<void>(COMMANDS.skillImportDiscard, { stagingId }),
-  skillRemove: (scope: SkillScope, workspaceId: string | null, directoryName: string, keepBackup: boolean) =>
+  skillRemove: (scope: AnySkillScope, workspaceId: string | null, directoryName: string, keepBackup: boolean) =>
     call<RemovedSkill>(COMMANDS.skillRemove, { request: { scope, workspaceId, directoryName, keepBackup } }),
   mcpOverview: (workspaceId: string | null) => call<McpOverview>(COMMANDS.mcpOverview, { workspaceId }),
-  memberResources: (workspaceId: string | null, provider: Provider, local = false) => call<MemberResourceCatalog>(COMMANDS.memberResources, { workspaceId, provider, local }),
+  memberResources: (workspaceId: string | null, provider: Provider, local = false) => call<ResourceCatalog>(COMMANDS.memberResources, { workspaceId, provider, local }),
+  /** Copies every skill the provider has into ThingMaker's imported-skills folder; reload the catalog afterwards. */
+  importedSkillsSetup: (provider: ImportedSkillsProvider) => call<ImportedSkillsStatus>(IMPORTED_SKILLS_SETUP, { provider }),
   mcpCatalog: () => call<McpCatalogEntry[]>(COMMANDS.mcpCatalog),
   mcpParse: (text: string, name?: string) => call<McpServerSpec[]>(COMMANDS.mcpParse, { request: { text, name: name ?? null } }),
   mcpInstall: (workspaceId: string | null, spec: McpServerSpec, providers: Provider[], scope: McpScope) =>

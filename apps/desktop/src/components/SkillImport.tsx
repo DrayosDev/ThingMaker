@@ -7,13 +7,13 @@
  */
 import { useEffect, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import type { ImportPlan, SkillScope } from "@thingmaker/contracts";
-import { api } from "../ipc";
+import type { ImportPlan } from "@thingmaker/contracts";
+import { api, type AnySkillScope } from "../ipc";
 import { useStore } from "../store";
 import { t } from "../i18n";
 
 /** A skill scope as the person reads it. */
-const scopeLabel = (scope: SkillScope) => (scope === "project" ? t("project") : t("user"));
+const scopeLabel = (scope: AnySkillScope) => (scope === "project" ? t("project") : scope === "thingmaker" ? "ThingMaker" : t("user"));
 
 function bytes(n: number): string {
   return n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KiB` : `${(n / 1024 / 1024).toFixed(1)} MiB`;
@@ -22,7 +22,7 @@ function bytes(n: number): string {
 export function SkillImport({ workspaceId, onDone }: { workspaceId: string | null; onDone: () => void }) {
   const setError = useStore((s) => s.setError);
   const [plan, setPlan] = useState<ImportPlan | null>(null);
-  const [scope, setScope] = useState<SkillScope>(workspaceId ? "project" : "user");
+  const [scope, setScope] = useState<AnySkillScope>(workspaceId ? "project" : "user");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [replace, setReplace] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -151,13 +151,14 @@ export function SkillImport({ workspaceId, onDone }: { workspaceId: string | nul
             )}
             <div className="row wrap">
               <span className="small">{t("Install into")}</span>
-              {(["project", "user"] as const).map((s) => (
+              {(["project", "user", "thingmaker"] as const).map((s) => (
                 <label className="check small" key={s}>
                   <input checked={scope === s} disabled={s === "project" && !workspaceId} name="skill-scope" onChange={() => setScope(s)} type="radio" />
-                  {s === "project" ? t("this workspace (.agents/skills)") : t("your user (~/.agents/skills)")}
+                  {s === "project" ? t("this workspace (.agents/skills)") : s === "user" ? t("your user (~/.agents/skills)") : t("ThingMaker (~/.thingmaker/skills)")}
                 </label>
               ))}
             </div>
+            {scope === "thingmaker" && <p className="small muted">{t("Available to every agent through ThingMaker's selector")}</p>}
             <ul className="call-list">
               {plan.skills.map((skill) => (
                 <li className="card" key={skill.directoryName}>

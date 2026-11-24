@@ -19,6 +19,9 @@ use serde::{Deserialize, Serialize};
 pub enum SkillScope {
     Project,
     User,
+    /// ThingMaker's own skills (`~/.thingmaker/skills`): no agent reads them
+    /// natively; the member selector offers them to every agent.
+    Thingmaker,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,11 +182,12 @@ pub fn user_skills_root(home: &Path) -> PathBuf {
     home.join(".agents").join("skills")
 }
 
-/// Discovers project and user skills and marks same-name collisions.
+/// Discovers project, user and ThingMaker skills and marks same-name collisions.
 pub fn discover_skills(root: &Path, home: Option<&Path>) -> Vec<SkillEntry> {
     let mut skills = scan_root(&project_skills_root(root), SkillScope::Project);
     if let Some(home) = home {
         skills.extend(scan_root(&user_skills_root(home), SkillScope::User));
+        skills.extend(scan_root(&super::member_resources::thingmaker_skills_root(home), SkillScope::Thingmaker));
     }
     let names: Vec<(String, SkillScope)> = skills
         .iter()
@@ -198,6 +202,8 @@ pub fn discover_skills(root: &Path, home: Option<&Path>) -> Vec<SkillEntry> {
         match skill.scope {
             SkillScope::Project => skill.shadows = Some(SkillScope::User),
             SkillScope::User => skill.shadowed = others.contains(&SkillScope::Project),
+            // Reached only through the selector, where both stay selectable.
+            SkillScope::Thingmaker => {}
         }
     }
     skills
