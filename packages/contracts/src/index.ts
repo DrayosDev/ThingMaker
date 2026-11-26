@@ -551,12 +551,29 @@ export type MemberMcpDependency = { name: string; evidence: "declared" | "refere
 export type MemberResourceEntry = { id: string; kind: "skill" | "mcp"; name: string; description: string; group: string; source?: string; target?: string; available: boolean; problem: string | null; mcpDependencies?: MemberMcpDependency[]; dependencyNotes?: string[] };
 export type MemberResourceCatalog = { entries: MemberResourceEntry[]; notes: string[]; problem: string | null };
 
+/**
+ * Who on a team may message the others directly: nobody, its members on
+ * cloud providers, or everyone. A local model runs sandboxed and offline, and
+ * a message to a cloud member is a way out of that, so it is left out unless
+ * the team says `all`.
+ */
+export type AgentChat = "off" | "cloud" | "all";
+export const DEFAULT_AGENT_CHAT: AgentChat = "cloud";
+
 /** The team behind one orchestrator session. */
 export type Combo = {
   workers: WorkerSlot[];
   /** Whether the orchestrator may also start its own provider's subagents. Read at session start. */
   nativeSubagents: boolean;
+  /** Who may use the team chat; absent is the default, cloud members only. */
+  agentChat?: AgentChat;
 };
+
+/** A team with its chat setting changed; the default is left out, as the host stores it. */
+export function withAgentChat(combo: Combo, agentChat: AgentChat): Combo {
+  const { agentChat: _previous, ...rest } = combo;
+  return agentChat === DEFAULT_AGENT_CHAT ? rest : { ...rest, agentChat };
+}
 
 export const EMPTY_COMBO: Combo = { workers: [], nativeSubagents: false };
 
@@ -616,6 +633,8 @@ export type JobView = {
   workerClosed?: boolean;
   /** Taken by a worker that had already done an earlier job, keeping its context. */
   warm?: boolean;
+  /** Started by a message from another agent, not by the orchestrator's `delegate`. */
+  chat?: boolean;
 };
 
 /** Emitted by the host on every job change. */
@@ -1470,7 +1489,7 @@ export type ContextBundle = { id: string; name: string; instructions: string; re
 // Attachments and mentions (UX-06, UX-07)
 // ---------------------------------------------------------------------------
 
-export type MediaKind = "image" | "audio";
+export type MediaKind = "image" | "audio" | "document";
 export type AttachmentSnapshot = {
   id: string;
   name: string;
@@ -1481,6 +1500,7 @@ export type AttachmentSnapshot = {
   height?: number;
   blobPath: string;
   sourcePath?: string;
+  document?: { text: string; warnings: string[] };
 };
 export type AttachmentPreview = { id: string; mime: string; dataBase64: string };
 export type MentionMode = { mode: "path_reference" } | { mode: "copied_content"; startLine?: number; endLine?: number };
@@ -1948,6 +1968,7 @@ export const COMMANDS = {
   delegationComboSet: "delegation_combo_set",
   delegationDefaultComboGet: "delegation_default_combo_get",
   delegationDefaultComboSet: "delegation_default_combo_set",
+  delegationChat: "delegation_chat",
   delegationJobs: "delegation_jobs",
   delegationJobCancel: "delegation_job_cancel",
   delegationQuota: "delegation_quota",
@@ -2060,3 +2081,57 @@ export const COMMANDS = {
 
 export type CommandName = (typeof COMMANDS)[keyof typeof COMMANDS];
 
+
+
+/** One message between two agents of a session. */
+export interface TeamChatMessage {
+  id: number;
+  from: string;
+  to: string;
+  fromName: string;
+  toName: string;
+  /** The sender's provider, for its mark beside the message. */
+  fromProvider: Provider;
+  text: string;
+  replyTo: number | null;
+  sentAt: number;
+  delivered: boolean;
+  error: string | null;
+}
+
+/**
+ * Why a session's agents can send no more: `paused` after too many messages
+ * in a row started work without the person writing (it resumes when they
+ * do), `full` once the session's total is spent.
+ */
+export type TeamChatStop = "paused" | "full";
+
+/**
+ * The host's record that it wrote an agent's message into a conversation,
+ * under the token that prompt carries. A prompt is shown as another agent's
+ * only when its token has one of these for the session it is in.
+ */
+export interface TeamChatReceipt {
+  token: string;
+  /** The sender's address: `orchestrator`, or a job id. */
+  from: string;
+  fromName: string;
+  fromProvider: Provider;
+  sentAt: number;
+}
+
+/** A session's agent chat as the host reports it. */
+export interface TeamChatView {
+  /** The messages of the team this session leads; none for a worker's. */
+  messages: TeamChatMessage[];
+  /** The agent messages written into this session's own conversation. */
+  received?: TeamChatReceipt[];
+  stopped?: TeamChatStop;
+  /** Messages in a row that may start work before the chat pauses. */
+  unpromptedLimit: number;
+  /** Messages one session's agents may exchange in all. */
+  messageLimit: number;
+}
+
+/** Emitted by the host when a session's agent chat changes; the payload names the session. */
+export const TEAM_CHAT_EVENT = "thingmaker://team-chat";

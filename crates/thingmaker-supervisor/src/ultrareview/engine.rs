@@ -30,7 +30,7 @@ use super::{
 use crate::{
     agents::Provider,
     delegation::{
-        Combo, Delegation, JobStatus, WorkerSlot,
+        AgentChat, Combo, Delegation, JobStatus, WorkerSlot,
         jobs::{BoxFuture, DelegateArgs, now_unix_ms},
     },
     error::DesktopError,
@@ -77,7 +77,9 @@ impl Runner for DelegationRunner {
             Some(provider) => provider,
             None => Provider::Claude,
         };
-        let combo = Combo { workers: review.reviewers.iter().map(Self::slot).collect(), native_subagents: false };
+        // Reviewers answer the review's own rounds and nothing else: a panel
+        // that could confer on the side would stop being several opinions.
+        let combo = Combo { workers: review.reviewers.iter().map(Self::slot).collect(), native_subagents: false, agent_chat: AgentChat::Off };
         self.delegation.register(&review.orchestrator_key(), lead, PathBuf::from(&review.root), combo);
         Ok(())
     }

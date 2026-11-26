@@ -18,7 +18,7 @@ pub mod jobs;
 pub mod mcp;
 pub mod socket;
 
-pub use combo::{Combo, QuotaBook, WorkerSlot};
+pub use combo::{AgentChat, Combo, QuotaBook, WorkerSlot};
 pub use jobs::{Caller, Delegation, JobStatus, JobView, TeamExtension, WorkerLauncher, WorkerSpec};
 
 /// What an orchestrator is told on top of the MCP server's own

@@ -30,6 +30,7 @@ import {
   type UrStartRequest,
   type NestedReport,
   type JobView,
+  type TeamChatView,
   type JobRetryPolicy,
   type AttachmentPreview,
   type GoalEdit,
@@ -479,7 +480,7 @@ export const api = {
     channel.onmessage = onProgress;
     return call<void>(COMMANDS.appUpdateInstall, { onProgress: channel });
   },
-  providerQuota: (provider: Provider) => call<QuotaSnapshot>(COMMANDS.providerQuota, { provider }),
+  providerQuota: (provider: Provider) => call<QuotaSnapshot | null>(COMMANDS.providerQuota, { provider }),
   providerLogout: (provider: Provider, account?: string) => call<void>(COMMANDS.providerLogout, { provider, account: account ?? null }),
   accountsList: (provider: Provider) => call<AccountView[]>(COMMANDS.accountsList, { provider }),
   accountAdd: (provider: Provider, label: string) => call<AccountView>(COMMANDS.accountAdd, { provider, label }),
@@ -490,6 +491,7 @@ export const api = {
   delegationComboSet: (handle: SessionHandle, combo: Combo) => call<Combo>(COMMANDS.delegationComboSet, { request: { handle, combo } }),
   delegationDefaultComboGet: () => call<Combo>(COMMANDS.delegationDefaultComboGet),
   delegationDefaultComboSet: (combo: Combo) => call<Combo>(COMMANDS.delegationDefaultComboSet, { combo }),
+  delegationChat: (handle: SessionHandle) => call<TeamChatView>(COMMANDS.delegationChat, { handle }),
   delegationJobs: (handle: SessionHandle) => call<JobView[]>(COMMANDS.delegationJobs, { handle }),
   delegationJobCancel: (handle: SessionHandle, jobId: string) => call<JobView>(COMMANDS.delegationJobCancel, { request: { handle, jobId } }),
   delegationJobRetry: (handle: SessionHandle, jobId: string) => call<JobView>(COMMANDS.delegationJobRetry, { request: { handle, jobId } }),

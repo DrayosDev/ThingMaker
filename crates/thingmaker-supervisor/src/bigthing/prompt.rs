@@ -457,6 +457,7 @@ mod tests {
         let team = Combo {
             workers: vec![WorkerSlot { name: "luna".into(), provider: Provider::Codex, model: Some("gpt-6-luna".into()), effort: None, capabilities: vec!["image".into()], note: None, prompt: None, resources: None }],
             native_subagents: false,
+            ..Default::default()
         };
         let text = build_briefing(&goal(), &plan(), &BriefingOptions { team: Some(&team), agent: Some(Provider::Claude), tools: true, ..Default::default() });
         assert!(text.contains("You lead a team: luna (Codex · gpt-6-luna; image)"));

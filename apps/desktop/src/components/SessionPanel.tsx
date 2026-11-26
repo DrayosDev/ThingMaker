@@ -1,6 +1,5 @@
-import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent, type ReactElement, type ReactNode } from "react";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
-import type { ContentBlock, Mention, Provider, ToolPatch } from "@thingmaker/contracts";
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactElement, type ReactNode } from "react";
+import type { AttachmentSnapshot, ContentBlock, Mention, Provider, ToolPatch } from "@thingmaker/contracts";
 import { PROVIDER_LABELS } from "@thingmaker/contracts";
 import { t } from "../i18n";
 import { useStore, isWorkerIn, sessionTitle, sessionContinuation, type SessionTab } from "../store";
@@ -29,8 +28,13 @@ import { ImagesPane } from "./ImagesPane";
 import { OdysseyPane } from "./OdysseyPane";
 import { UltraReviewPane, useUltraReviewLabel } from "./UltraReview";
 import { BigThingBand, BigThingTurnCard, SideNotesCard } from "./BigThingLinks";
+import { TeamChatBand, TeamChatTurn } from "./TeamChat";
+import { teamChatOf } from "../teamChatTurns";
 import { BackgroundTasksButton } from "./BackgroundTasks";
 import { bigThingTurnOf, splitSideNotes, userMessageText } from "../bigThingTurns";
+import { DocumentWarnings } from "./DocumentWarnings";
+import { DocumentText } from "./DocumentText";
+import { useFileDrop } from "../fileDrop";
 import { AttachmentThumb, BlockImage, InlineImage, workspaceImageRenderer } from "./InlineImage";
 import { remoteFull } from "../toolImages";
 import { Markdown, type PathHandler } from "../markdown";
@@ -89,9 +93,7 @@ function Blocks({ blocks, markdown, onLink, workspaceId }: { blocks: ContentBloc
             return markdown ? (
               <Markdown key={index} onCopyCode={copyText} onImage={workspaceImageRenderer(workspaceId)} onLink={onLink} onPath={onPath} source={block.text} />
             ) : (
-              <pre className="text" key={index}>
-                {block.text}
-              </pre>
+              <DocumentText text={block.text} key={index} />
             );
           case "image":
             return <BlockImage data={block.data} full={remoteFull((block as { thingmakerFull?: unknown }).thingmakerFull)} key={index} mimeType={block.mimeType} uri={block.uri} workspaceId={workspaceId} />;
@@ -242,7 +244,7 @@ function sameImages(a: ImageRef[] | undefined, b: ImageRef[] | undefined): boole
  * times a second, and redrawing — re-parsing the Markdown of — every visible
  * message on each update is what made a long session heavy to open.
  */
-const CardView = memo(
+export const CardView = memo(
   function CardView({ card, sessionId, images }: CardViewProps) {
     const workspaceId = useStore((s) => s.sessions[sessionId]?.workspaceId ?? "");
     const view = <CardBody card={card} sessionId={sessionId} />;
@@ -326,6 +328,24 @@ function ForkFromHere({ sessionId, cardKey }: { sessionId: string; cardKey: stri
   );
 }
 
+/**
+ * The person's own message. The right-hand bubble is always the person: no
+ * name over it. Its actions sit under it, shown on hover.
+ */
+function PersonMessage({ card, sessionId }: { card: Extract<Card, { kind: "message" }>; sessionId: string }) {
+  const workspaceId = useStore((s) => s.sessions[sessionId]?.workspaceId ?? "");
+  const openUrl = useStore((s) => s.openUrl);
+  return (
+    <div className="message-user">
+      <article className="card card-user" title={card.message.messageId}>
+        {card.message.contentUnknown && <span className="chip chip-warn small">{t("content not supplied")}</span>}
+        <Blocks blocks={shownBlocks(card)} markdown={false} onLink={(url) => (opensInPanel(url) ? openArtifact(url) : void openUrl(url))} workspaceId={workspaceId} />
+      </article>
+      <MessageActions card={card} sessionId={sessionId} />
+    </div>
+  );
+}
+
 function CardBody({ card, sessionId }: { card: Card; sessionId: string }) {
   // Narrow selections, so an update elsewhere in the session does not
   // redraw this card.
@@ -360,8 +380,18 @@ function CardBody({ card, sessionId }: { card: Card; sessionId: string }) {
         );
       }
       if (card.message.role === "user") {
-        // Big Thing's own prompts are not the user's words.
         const text = userMessageText(card);
+        // A message another agent of the team sent this one: an agent's
+        // words, drawn as an agent's once the host vouches for it.
+        const chat = teamChatOf(text);
+        if (chat) {
+          return (
+            <TeamChatTurn own={<PersonMessage card={card} sessionId={sessionId} />} sessionId={sessionId} token={chat.token}>
+              <Blocks blocks={[{ type: "text", text: chat.body }]} markdown onLink={onLink} workspaceId={workspaceId} />
+            </TeamChatTurn>
+          );
+        }
+        // Big Thing's own prompts are not the user's words.
         const turn = bigThingTurnOf(card.message.messageId, text);
         if (turn) return <BigThingTurnCard card={card} sessionId={sessionId} text={text} turn={turn} />;
         // Nor are the reports nested sessions passed on, or notes the side
@@ -371,19 +401,7 @@ function CardBody({ card, sessionId }: { card: Card; sessionId: string }) {
         if (nested.reports.length > 0) return <NestedReportsCard own={rest} reports={nested.reports} />;
         if (notes.length > 0) return <SideNotesCard notes={notes} own={rest} />;
       }
-      if (card.message.role === "user") {
-        // The right-hand bubble is always the person: no name over it. Its
-        // actions sit under it, shown on hover.
-        return (
-          <div className="message-user">
-            <article className="card card-user" title={card.message.messageId}>
-              {card.message.contentUnknown && <span className="chip chip-warn small">{t("content not supplied")}</span>}
-              <Blocks blocks={shownBlocks(card)} markdown={false} onLink={onLink} workspaceId={workspaceId} />
-            </article>
-            <MessageActions card={card} sessionId={sessionId} />
-          </div>
-        );
-      }
+      if (card.message.role === "user") return <PersonMessage card={card} sessionId={sessionId} />;
       return (
         <article className={`card card-${card.message.role}`}>
           <header className="small muted" title={card.message.messageId}>
@@ -526,13 +544,6 @@ export function placeDocs(groups: CardGroup[], tools: Map<string, ToolPatch>, ro
 
 function bytesLabel(n: number): string {
   return n < 1024 * 1024 ? `${(n / 1024).toFixed(0)} KiB` : `${(n / 1024 / 1024).toFixed(1)} MiB`;
-}
-
-function toBase64(buffer: ArrayBuffer): string {
-  const bytes = new Uint8Array(buffer);
-  let binary = "";
-  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-  return btoa(binary);
 }
 
 /** The views kept behind one menu so the bar stays quiet. */
@@ -751,7 +762,8 @@ export function SessionPanel({ sessionId }: { sessionId: string }) {
    *  there once the cards are in. Set while a page is loading, so one reach of
    *  the top loads one page. */
   const growingRef = useRef<{ height: number; top: number } | null>(null);
-  const [dropping, setDropping] = useState(false);
+  const receiveAttachments = useCallback((files: AttachmentSnapshot[]) => addAttachments(sessionId, files), [sessionId, addAttachments]);
+  const fileDrop = useFileDrop(receiveAttachments, tab === "transcript" && !!session && session.projection.process !== "exited");
   const [mention, setMention] = useState<{ token: string; matches: string[]; index: number; truncated: boolean; copy: boolean } | null>(null);
 
   // The transcript follows new output only while it is scrolled to the
@@ -895,42 +907,6 @@ export function SessionPanel({ sessionId }: { sessionId: string }) {
     if (searchOpen) requestAnimationFrame(() => searchRef.current?.focus());
   }, [searchOpen]);
 
-  // OS drag-and-drop of files onto the window (UX-05): paths are validated,
-  // sniffed and snapshotted natively before they become attachments.
-  useEffect(() => {
-    let unlisten: (() => void) | null = null;
-    let webview: ReturnType<typeof getCurrentWebview>;
-    try {
-      webview = getCurrentWebview();
-    } catch {
-      // Not running inside Tauri (tests); drag-and-drop is unavailable.
-      return;
-    }
-    webview
-      .onDragDropEvent((event) => {
-        if (event.payload.type === "enter" || event.payload.type === "over") setDropping(true);
-        else if (event.payload.type === "leave") setDropping(false);
-        else if (event.payload.type === "drop") {
-          setDropping(false);
-          const state = useStore.getState();
-          if (state.view.kind !== "session") return;
-          // A drop listener is webview-wide, so the tab that owns the drop
-          // gets it: the Big Thing tab reads a dropped Markdown plan, and a
-          // file dropped there must not also become an attachment.
-          if (state.sessionTab === "odyssey") return;
-          api
-            .attachmentAddPaths(event.payload.paths)
-            .then((snapshots) => addAttachments(sessionId, snapshots))
-            .catch(setError);
-        }
-      })
-      .then((fn) => {
-        unlisten = fn;
-      })
-      .catch(() => undefined);
-    return () => unlisten?.();
-  }, [sessionId, addAttachments, setError]);
-
   // Grow the composer with its content: one line when empty, up to seven,
   // then it scrolls. The bounds live in CSS (min-height/max-height); this
   // only measures the text, so the two cannot drift apart.
@@ -976,19 +952,6 @@ export function SessionPanel({ sessionId }: { sessionId: string }) {
     },
     [mention, draft, sessionId, setDraft, addMention],
   );
-
-  const onPaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
-    const files = [...(event.clipboardData?.files ?? [])];
-    if (files.length === 0) return;
-    event.preventDefault();
-    for (const file of files) {
-      file
-        .arrayBuffer()
-        .then((buffer) => api.attachmentAddBytes(file.name || "pasted-image", toBase64(buffer)))
-        .then((snapshot) => addAttachments(sessionId, [snapshot]))
-        .catch(setError);
-    }
-  };
 
   const filteredCards = useMemo(() => {
     if (!session) return [];
@@ -1038,7 +1001,7 @@ export function SessionPanel({ sessionId }: { sessionId: string }) {
   const steerFirst = followUp === "steer" && canSteer;
   const sendKey = uiPrefs.enterSends ? "Enter" : "Shift+Enter";
   const hasInput = !!draft.trim() || attachments.length > 0 || mentions.length > 0;
-  const canSend = !inFlightRequestId && projection.attachment === "attached" && projection.process !== "exited";
+  const canSend = !inFlightRequestId && !fileDrop.uploading && projection.attachment === "attached" && projection.process !== "exited";
   // Only a submission that went wrong is worth a line under the prompt.
   const lastSubmission = [...projection.submissions.entries()].filter(([, entry]) => entry.state === "rejected" || entry.state === "outcome_unknown").at(-1);
   const mediaOk = { image: projection.capabilities?.promptImage ?? false, audio: projection.capabilities?.promptAudio ?? false };
@@ -1116,7 +1079,7 @@ export function SessionPanel({ sessionId }: { sessionId: string }) {
   ];
 
   return (
-    <section className={`panel session-panel ${dropping ? "drop-target" : ""} ${quick ? "session-quick" : ""}`}>
+    <section className={`panel session-panel ${fileDrop.dropping ? "drop-target" : ""} ${quick ? "session-quick" : ""}`} {...(tab === "transcript" ? fileDrop.handlers : {})}>
       <>
       <header className="session-header">
         <h2
@@ -1224,6 +1187,7 @@ export function SessionPanel({ sessionId }: { sessionId: string }) {
             </div>
           )}
           <BigThingBand sessionId={sessionId} />
+          <TeamChatBand sessionId={sessionId} />
           <div aria-busy={active} className="transcript" ref={transcriptRef}>
             <EarlierConversation sessionId={sessionId} />
             {transcriptGroups.map((group, index, groups) => (
@@ -1323,6 +1287,8 @@ export function SessionPanel({ sessionId }: { sessionId: string }) {
         <NestedBanner sessionId={sessionId} />
         <NestedReportsStrip sessionId={sessionId} />
         <div className="composer-card">
+        {fileDrop.uploading && <span className="small muted" role="status">{t("Reading files…")}</span>}
+        {fileDrop.dropping && <span className="small" role="status">{t("Drop files to attach them")}</span>}
         {(attachments.length > 0 || mentions.length > 0) && (
           <div className="attachment-strip">
             {mentions.map((m, index) => (
@@ -1345,7 +1311,7 @@ export function SessionPanel({ sessionId }: { sessionId: string }) {
               </span>
             ))}
             {attachments.map((a) => (
-              <span className="attachment-chip" key={a.id} title={`${a.mime} · ${a.bytes} bytes · blake3 ${a.id.slice(0, 12)}`}>
+              <span className={`attachment-chip${a.kind === "document" ? " attachment-chip-document" : ""}`} key={a.id} title={`${a.mime} · ${a.bytes} bytes · ${a.id.slice(0, 12)}`}>
                 {a.kind === "image" && <AttachmentThumb id={a.id} name={a.name} />}
                 <span className="small">
                   {a.name}
@@ -1355,7 +1321,8 @@ export function SessionPanel({ sessionId }: { sessionId: string }) {
                     {a.kind === "image" && a.width && a.height ? ` · ${a.width}×${a.height}` : ""}
                   </span>
                 </span>
-                {!mediaOk[a.kind] && <span className="chip small chip-warn">{a.kind === "image" ? t("runtime did not advertise image prompts") : t("runtime did not advertise audio prompts")}</span>}
+                {a.kind !== "document" && !mediaOk[a.kind] && <span className="chip small chip-warn">{a.kind === "image" ? t("runtime did not advertise image prompts") : t("runtime did not advertise audio prompts")}</span>}
+                <DocumentWarnings attachment={a} />
                 <button aria-label={t("remove attachment {name}", { name: a.name })} className="link small" onClick={() => removeAttachment(sessionId, a.id)} type="button">
                   ×
                 </button>
@@ -1395,7 +1362,7 @@ export function SessionPanel({ sessionId }: { sessionId: string }) {
             className="textarea"
             onChange={(event) => { dismissSuggestion(); setDraft(sessionId, event.target.value); }}
             onKeyDown={onKeyDown}
-            onPaste={onPaste}
+            onPaste={fileDrop.onPaste}
             aria-describedby={suggestion ? "reply-suggestion-hint" : undefined}
             placeholder={suggestion || (
               active
@@ -1417,7 +1384,7 @@ export function SessionPanel({ sessionId }: { sessionId: string }) {
         <VoiceInput key={sessionId} target={sessionId} draft={draft} input={composerRef} localOnly={session.snapshot.provider === "local"} disabled={!canSend} onChange={(text) => { dismissSuggestion(); setDraft(sessionId, text); }} />
         <div className="composer-row">
           <button
-            aria-label={t("Attach media")}
+            aria-label={t("Attach files")}
             className="icon-button"
             disabled={!canSend}
             onClick={() =>
@@ -1426,7 +1393,7 @@ export function SessionPanel({ sessionId }: { sessionId: string }) {
                 .then((snapshots) => addAttachments(sessionId, snapshots))
                 .catch(setError)
             }
-            title={t("Attach PNG, JPEG, GIF, WebP, WAV or MP3 (8 files, 10 MiB each, 20 MiB total). Type @ to mention a file.")}
+            title={t("Attach images, audio, Markdown, JSON, TXT, DOCX or PDF (8 files, 10 MiB each, 20 MiB total). Type @ to mention a file.")}
             type="button"
           >
             <IconPaperclip />

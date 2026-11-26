@@ -100,6 +100,23 @@ describe("the team chart", () => {
     expect(combo.workers[1]).toMatchObject({ name: "Artist", provider: "codex", model: "gpt-6-astra", capabilities: ["image", "ui"], note: "Images, icons and UI art" });
   });
 
+  it("sets who may use agent chat, leaving the default out of what is saved", () => {
+    const { rerender } = draw();
+    fireEvent.click(screen.getByRole("button", { name: /Leads/ }));
+    const chat = screen.getByRole("group", { name: "Agent chat" });
+    expect(within(chat).getByRole("button", { name: "Cloud agents" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByText(/Local models are left out/)).toBeTruthy();
+    fireEvent.click(within(chat).getByRole("button", { name: "Everyone" }));
+    expect(combo.agentChat).toBe("all");
+    rerender(<TeamChart combo={combo} onChange={onChange} orchestrator={orchestrator} />);
+    expect(screen.getByText(/local models too/)).toBeTruthy();
+    fireEvent.click(within(screen.getByRole("group", { name: "Agent chat" })).getByRole("button", { name: "Nobody" }));
+    expect(combo.agentChat).toBe("off");
+    rerender(<TeamChart combo={combo} onChange={onChange} orchestrator={orchestrator} />);
+    fireEvent.click(within(screen.getByRole("group", { name: "Agent chat" })).getByRole("button", { name: "Cloud agents" }));
+    expect("agentChat" in combo).toBe(false);
+  });
+
   it("changes who leads from the same picker and keeps signed-out Gemini unavailable", () => {
     draw();
     fireEvent.click(screen.getByRole("button", { name: /Leads/ }));

@@ -73,6 +73,38 @@ impl WorkerSlot {
     }
 }
 
+/// Who on a team may message the others directly (`chat_send`).
+///
+/// A local model runs sandboxed and offline; a message to a cloud member is
+/// a way out of that, so local members are left out unless the team says
+/// otherwise.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentChat {
+    /// Nobody: members only report to the orchestrator.
+    Off,
+    /// Members on cloud providers. The default.
+    #[default]
+    Cloud,
+    /// Everyone, local models included.
+    All,
+}
+
+impl AgentChat {
+    /// Whether a member on `provider` takes part.
+    pub fn includes(self, provider: Provider) -> bool {
+        match self {
+            Self::Off => false,
+            Self::Cloud => provider != Provider::Local,
+            Self::All => true,
+        }
+    }
+
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// The team behind one orchestrator session.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -85,6 +117,10 @@ pub struct Combo {
     /// when the session starts: the providers take it at launch only.
     #[serde(default)]
     pub native_subagents: bool,
+    /// Who may use the team chat. Read at each message, so it can change
+    /// while the session runs.
+    #[serde(default, skip_serializing_if = "AgentChat::is_default")]
+    pub agent_chat: AgentChat,
 }
 
 impl Combo {
@@ -339,6 +375,7 @@ mod tests {
         Combo {
             workers: vec![slot("sonnet", Provider::Claude, &["code", "review"]), slot("luna", Provider::Codex, &["image", "fast", "code"])],
             native_subagents: false,
+            ..Default::default()
         }
     }
 
@@ -396,16 +433,33 @@ mod tests {
                 slot("coder", Provider::Claude, &[]),
             ],
             native_subagents: false,
+            ..Default::default()
         }
         .normalized();
         let names: Vec<&str> = combo.workers.iter().map(|w| w.name.as_str()).collect();
         assert_eq!(names, ["gpt-6-luna", "luna", "coder"]);
         assert_eq!(combo.workers[0].capabilities, ["image"]);
-        let doubled = Combo { workers: vec![slot("a", Provider::Codex, &[]), slot("A", Provider::Claude, &[])], native_subagents: true }.normalized();
+        let doubled = Combo { workers: vec![slot("a", Provider::Codex, &[]), slot("A", Provider::Claude, &[])], native_subagents: true, ..Default::default() }.normalized();
         assert_eq!(doubled.workers[1].name, "A-2");
         assert!(!doubled.withholds_native_subagents());
         assert!(combo.withholds_native_subagents());
         assert!(!Combo::default().withholds_native_subagents(), "nobody to delegate to: native subagents stay");
         assert_eq!(format_reset(1_790_785_099), "2026-09-30 16:18 UTC");
+    }
+
+    #[test]
+    fn agent_chat_leaves_local_members_out_unless_the_team_asks() {
+        assert!(AgentChat::default().includes(Provider::Claude) && AgentChat::default().includes(Provider::Gemini));
+        assert!(!AgentChat::default().includes(Provider::Local), "a sandboxed model gets no channel to a cloud agent by default");
+        assert!(AgentChat::All.includes(Provider::Local));
+        assert!(!AgentChat::Off.includes(Provider::Codex));
+        // A team saved before the setting existed reads as the default, and
+        // the default is not written back.
+        let old: Combo = serde_json::from_str(r#"{"workers":[],"nativeSubagents":false}"#).unwrap();
+        assert_eq!(old.agent_chat, AgentChat::Cloud);
+        assert_eq!(serde_json::to_string(&old).unwrap(), r#"{"workers":[],"nativeSubagents":false}"#);
+        let all = Combo { agent_chat: AgentChat::All, ..Combo::default() };
+        assert_eq!(serde_json::to_value(&all).unwrap()["agentChat"], "all");
+        assert_eq!(serde_json::from_value::<Combo>(serde_json::to_value(&all).unwrap()).unwrap(), all);
     }
 }

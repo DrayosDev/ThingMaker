@@ -2414,6 +2414,12 @@ body.resizing-sidebar * {
   margin-top: 0;
 }
 
+/* A message another agent of the team sent this one: where an answer is,
+   under its sender's mark and name, and never the person's bubble. */
+.card-team-chat .team-chat-from {
+  margin-bottom: 2px;
+}
+
 /* A message's copy/fork: icons on a row under it, shown while the pointer is
    over the message. The row keeps its room, so nothing moves on hover. */
 .message-user {
@@ -2919,6 +2925,49 @@ body.resizing-sidebar * {
 .attachment-chip:has(.attachment-thumb) {
   border-radius: 8px;
   padding: 3px 8px 3px 3px;
+}
+
+.attachment-chip-document {
+  max-width: 100%;
+  flex-wrap: wrap;
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+}
+
+.attachment-chip-document > .document-warnings {
+  flex-basis: 100%;
+  order: 1;
+}
+
+.attachment-chip-document > button {
+  margin-left: auto;
+}
+
+.document-warnings {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.chat-document {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+}
+
+.chat-document summary {
+  cursor: pointer;
+}
+
+.chat-document .text {
+  max-height: 360px;
+  overflow: auto;
 }
 
 .mention-popover {
@@ -4698,6 +4747,19 @@ body.resizing-sidebar * {
   color: var(--text);
 }
 
+.project-menu,
+.session-menu {
+  max-height: 100vh;
+  overflow-y: auto;
+}
+
+.project-menu .context-item:disabled,
+.session-menu .context-item:disabled {
+  opacity: 0.5;
+  background: none;
+  cursor: default;
+}
+
 .session-rename {
   flex: 1;
   display: flex;
@@ -6283,6 +6345,8 @@ button.odyssey-task-title svg {
 .team-menu-anchor {
   position: relative;
   display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
 }
 
 .team-chip {
@@ -6291,7 +6355,13 @@ button.odyssey-task-title svg {
   gap: 5px;
 }
 
+.team-chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .team-chip svg {
+  flex: none;
   color: var(--muted);
 }
 

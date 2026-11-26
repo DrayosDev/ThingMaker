@@ -403,7 +403,7 @@ pub async fn session_open(request: OpenRequest, state: State<'_, AppState>) -> C
     // By the handle, and by the agent's own id: a worker opened by a
     // delegation is addressed by a reserved handle, and resuming its id would
     // start a second process on a session the first one is still writing.
-    let running_elsewhere = matches!(&request.mode, OpenRequestMode::Resume { session_id } if state.actor_ids().iter().any(|id| state.agent_session_id(id) == *session_id));
+    let running_elsewhere = matches!(&request.mode, OpenRequestMode::Resume { session_id } if state.conversation_attached(session_id));
     if state.actor(session_id.as_str()).is_some() || running_elsewhere {
         return Err(DesktopError::conflict(
             "This session is already attached in this application. Use the existing attachment instead of starting a second agent process.",
@@ -668,6 +668,7 @@ pub async fn session_submit(request: SubmitRequest, state: State<'_, AppState>) 
         return Err(DesktopError::io("invalid request id"));
     }
     let actor = actor_for(&state, &request.handle)?;
+    super::delegation::note_person(&state, &request.handle.id);
     let root = state
         .actor_entries()
         .into_iter()
@@ -764,6 +765,9 @@ async fn prompt_blocks(
         blocks.push(json!({ "type": "text", "text": text }));
     }
     if !attachment_ids.is_empty() {
+        if attachment_ids.len() > thingmaker_supervisor::attachments::MAX_ATTACHMENTS {
+            return Err(DesktopError::limit_exceeded("at most 8 attachments per prompt"));
+        }
         let capabilities = actor.snapshot().await?.capabilities;
         let (prompt_image, prompt_audio) = capabilities
             .as_ref()
@@ -771,14 +775,16 @@ async fn prompt_blocks(
             .unwrap_or((false, false));
         let store = thingmaker_supervisor::attachments::AttachmentStore::new(&state.data_dir);
         let mut snapshots = Vec::new();
-        let mut media = Vec::new();
+        let mut contents = Vec::new();
         for id in attachment_ids {
             let (snapshot, bytes) = store.load(id)?;
-            media.push(thingmaker_supervisor::attachments::media_block(&snapshot, &bytes, prompt_image, prompt_audio)?);
+            contents.push(bytes);
             snapshots.push(snapshot);
         }
         thingmaker_supervisor::attachments::check_envelope(&snapshots)?;
-        blocks.extend(media);
+        for (snapshot, bytes) in snapshots.iter().zip(&contents) {
+            blocks.push(thingmaker_supervisor::attachments::media_block(snapshot, bytes, prompt_image, prompt_audio)?);
+        }
     }
     Ok(blocks)
 }
@@ -817,6 +823,7 @@ pub async fn session_enqueue(request: EnqueueRequest, state: State<'_, AppState>
         return Err(DesktopError::io("the queued prompt's composer state is too large"));
     }
     let actor = actor_for(&state, &request.handle)?;
+    super::delegation::note_person(&state, &request.handle.id);
     let root = state
         .actor_entries()
         .into_iter()
@@ -859,6 +866,7 @@ pub async fn session_steer(request: SteerRequest, state: State<'_, AppState>) ->
         return Err(DesktopError::io("steer text is empty"));
     }
     let actor = actor_for(&state, &request.handle)?;
+    super::delegation::note_person(&state, &request.handle.id);
     actor.steer_text(&request.text).await
 }
 
