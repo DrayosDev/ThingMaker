@@ -63,8 +63,6 @@ struct Index {
     synced_at: Option<i64>,
     /// Unit key → what was copied, and into which folder.
     units: BTreeMap<String, Unit>,
-    /// Folders no unit points at any more, kept until nothing can be using them.
-    retired: BTreeSet<String>,
     /// What the last import could not copy.
     problems: Vec<String>,
 }
@@ -190,9 +188,11 @@ pub(super) fn hold(root: &Path) {
     if let Ok(file) = File::open(root.join(IN_USE_LOCK)) && file.lock_shared().is_ok() { held.insert(root.to_path_buf(), file); }
 }
 
-/// Whether no running ThingMaker has started a session with imported skills.
-fn unused(root: &Path) -> bool {
-    File::open(root.join(IN_USE_LOCK)).is_ok_and(|file| file.try_lock().is_ok())
+/// The lock `hold` shares, taken whole: granted only while no running
+/// ThingMaker has started a session with imported skills, and none can start
+/// one with them until it is dropped.
+fn unused(root: &Path) -> Option<File> {
+    File::open(root.join(IN_USE_LOCK)).ok().filter(|file| file.try_lock().is_ok())
 }
 
 /// Copies `provider`'s skills, as `entries` lists them before any import is
@@ -242,18 +242,22 @@ pub(super) fn sync(root: &Path, provider: &str, entries: &[ResourceEntry]) -> Re
     // A unit this catalog does not offer may belong to another project or
     // account. It goes only when its source is gone from the disk.
     index.units.retain(|key, unit| units.contains_key(key) || unit.source.exists());
-    // Every other folder here is a copy nothing points at any more.
-    let current: BTreeSet<&str> = index.units.values().map(|unit| unit.folder.as_str()).collect();
-    let mut retired = BTreeSet::new();
-    for entry in std::fs::read_dir(&directory).map_err(failed)?.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if !name.starts_with('.') && plain_name(&name) && !current.contains(name.as_str()) && entry.file_type().is_ok_and(|kind| kind.is_dir()) { retired.insert(name); }
-    }
-    if unused(root) { retired.retain(|folder| std::fs::remove_dir_all(directory.join(folder)).is_err()); }
-    index.retired = retired;
     index.problems = problems;
     index.synced_at = Some(now_millis());
-    write_index(&directory, &index).map_err(failed)
+    write_index(&directory, &index).map_err(failed)?;
+    // Every other folder here is a copy nothing points at any more, now that
+    // the index is written. It is removed once nothing can be reading it; until
+    // then it stays, and a later import finds it again.
+    if let Some(_nothing_reads) = unused(root) {
+        let current: BTreeSet<&str> = index.units.values().map(|unit| unit.folder.as_str()).collect();
+        for entry in std::fs::read_dir(&directory).map_err(failed)?.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with('.') && plain_name(&name) && !current.contains(name.as_str()) && entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Lists each imported provider's skills from their copies. Reads only.
