@@ -775,7 +775,9 @@ impl Delegation {
             prompt = task.to_string();
         }
         let caller = Caller::Worker { orchestrator: session.into(), root: root.clone(), name: slot.name.clone(), provider: slot.provider, job_id: view.id.clone() };
-        if slot.provider == Provider::Gemini && self.chat_open_to(&caller) {
+        // A worker without the team server has no chat tools: it is told
+        // how to write a message in its reply instead.
+        if !slot.provider.worker_team_server() && self.chat_open_to(&caller) {
             let members = serde_json::Value::Array(self.chat_members(&caller));
             prompt.push_str(&format!("\nTeam chat addresses: {members}. To send or reply, finish with a line TEAM_CHAT followed by a JSON object with string fields to and text, and optional numeric reply_to."));
             // It has no tool call to hear this through.
@@ -911,7 +913,7 @@ impl Delegation {
             let outcome = self.turn(&job_id, &worker, &next_prompt).await;
             match outcome {
                 TurnOutcome::Done { text, limited: None } => {
-                    if spec.slot.provider == Provider::Gemini {
+                    if !spec.slot.provider.worker_team_server() {
                         self.gemini_messages(&spec, &text);
                     }
                     self.finish(&job_id, JobStatus::Succeeded, Some(text), None);

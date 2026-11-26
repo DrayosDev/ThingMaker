@@ -267,9 +267,11 @@ impl WorkerLauncher for HostLauncher {
             config.environment = super::session::launch_environment(&state).with_program_dir(&program);
             config.before_prompt = Some(super::review::turn_snapshots(&state, &record.id, &record.canonical_root));
             // The worker's own reduced team server: the project memory and the
-            // run's board (ADR-010). A provider that cannot load one goes without.
+            // run's board (ADR-010). A provider that cannot load one as a
+            // worker goes without: Gemini, which stays on its stream-json
+            // bridge here.
             if let (Some(token), Some(socket), Some(program)) = (spec.mcp_token.as_deref(), state.delegation_socket.get(), relay_program())
-                && spec.slot.provider.can_orchestrate()
+                && spec.slot.provider.worker_team_server()
             {
                 config.mcp_servers = vec![server_entry(&program, &[RELAY_ARG.to_string()], socket.path(), token)];
                 if spec.slot.provider == Provider::Claude {

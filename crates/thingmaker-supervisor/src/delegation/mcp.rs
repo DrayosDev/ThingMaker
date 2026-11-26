@@ -245,6 +245,15 @@ fn with_undelivered(delegation: &Delegation, caller: &Caller, mut result: Value)
     result
 }
 
+/// Whether the caller uses the chat through this server's tools: the team
+/// lets it in, and it is not a worker that writes its messages in its replies
+/// (a Gemini worker). A member has one way into the chat, never both, so a
+/// host that handed such a worker this server anyway changes nothing.
+fn chat_tools_for(delegation: &Delegation, caller: &Caller) -> bool {
+    let writes_in_replies = matches!(caller, Caller::Worker { provider, .. } if !provider.worker_team_server());
+    !writes_in_replies && delegation.chat_open_to(caller)
+}
+
 /// Every tool this caller may use: the team's own (orchestrators only), then
 /// the extension's.
 fn tools_for(delegation: &Delegation, caller: &Caller) -> Value {
@@ -254,7 +263,7 @@ fn tools_for(delegation: &Delegation, caller: &Caller) -> Value {
     };
     // Only for a caller the team lets into the chat: a tool that always
     // refuses is a way to waste a turn.
-    if delegation.chat_open_to(caller) {
+    if chat_tools_for(delegation, caller) {
         list.extend([
             json!({"name":"chat_members","description":"List addresses of actual participants in this session, including closed workers you can wake.","annotations":{"readOnlyHint":true,"openWorldHint":false},"inputSchema":{"type":"object","properties":{},"additionalProperties":false}}),
             json!({"name":"chat_send","description":"Message one participant in this session. Returns immediately, before delivery: a message its recipient could not take is listed under `undelivered` in the result of your next chat call. Reply with reply_to and the sender address. Send only when you have information or a question; acknowledgements are unnecessary.","annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":false},"inputSchema":{"type":"object","properties":{"to":{"type":"string"},"text":{"type":"string"},"reply_to":{"type":"integer","minimum":1}},"required":["to","text"],"additionalProperties":false}})
@@ -280,7 +289,7 @@ pub async fn handle(delegation: &Delegation, caller: &Caller, message: &Value) -
                 Caller::Orchestrator { .. } => INSTRUCTIONS.to_string(),
                 Caller::Worker { .. } => WORKER_INSTRUCTIONS.to_string(),
             };
-            if delegation.chat_open_to(caller) {
+            if chat_tools_for(delegation, caller) {
                 instructions.push_str(" Use chat_members and chat_send to coordinate directly with participants in this session.");
             }
             for extra in delegation.extensions().iter().filter_map(|extension| extension.instructions(caller)) {
@@ -300,11 +309,13 @@ pub async fn handle(delegation: &Delegation, caller: &Caller, message: &Value) -
             let name = params.get("name").and_then(Value::as_str).unwrap_or_default();
             let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
             if name == "chat_members" {
-                if delegation.chat_open_to(caller) {
+                if chat_tools_for(delegation, caller) {
                     text_result(&with_undelivered(delegation, caller, json!({"members":delegation.chat_members(caller)})), false)
                 } else {
                     error_result("Agent chat is off for this member of the team.")
                 }
+            } else if name == "chat_send" && !chat_tools_for(delegation, caller) {
+                error_result("This member of the team cannot send chat messages with this tool.")
             } else if name == "chat_send" {
                 let reply = arguments.get("reply_to").map(|v| v.as_u64().and_then(|id| usize::try_from(id).ok()).ok_or("Invalid reply_to."));
                 let result = reply.transpose().map_err(str::to_owned).and_then(|reply| delegation.send_chat(caller, arguments["to"].as_str().unwrap_or(""), arguments["text"].as_str().unwrap_or(""), reply));
