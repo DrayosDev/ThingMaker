@@ -859,7 +859,8 @@ async fn a_gemini_member_has_one_way_into_the_chat_and_the_teams_setting_decides
     // even by a host that handed it the team server anyway.
     let worker = service.caller_for_token(spec.mcp_token.as_deref().unwrap()).unwrap();
     assert!(service.chat_open_to(&worker));
-    assert!(prompts_of(&launcher.actors.lock().unwrap()[0]).await.contains("finish with a line TEAM_CHAT"));
+    let first = launcher.actors.lock().unwrap()[0].clone();
+    assert!(prompts_of(&first).await.contains("finish with a line TEAM_CHAT"));
     assert!(!tool_names(&service, &worker).await.iter().any(|name| name.starts_with("chat_")), "one way in, not two");
     for tool in ["chat_send", "chat_members"] {
         let called = mcp::handle(&service, &worker, &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": tool, "arguments": {"to": "orchestrator", "text": "Hello"}}})).await.unwrap();

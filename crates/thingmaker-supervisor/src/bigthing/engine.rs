@@ -1847,6 +1847,14 @@ pub fn validate_goal_leadership(provider: Option<Provider>, team: Option<&serde_
     Ok(())
 }
 
+/// A goal's own team: `{orchestrator, combo}`.
+pub fn team_of(goal: &OdysseyRecord) -> Option<(TeamLead, Combo)> {
+    let team = goal.team.as_ref()?;
+    let lead: TeamLead = team.get("orchestrator").cloned().and_then(|value| serde_json::from_value(value).ok()).unwrap_or_default();
+    let combo: Combo = team.get("combo").cloned().and_then(|value| serde_json::from_value(value).ok()).unwrap_or_default();
+    Some((lead, combo.normalized()))
+}
+
 #[cfg(test)]
 mod goal_leadership_tests {
     use super::*;
@@ -1867,12 +1875,4 @@ mod goal_leadership_tests {
         }
         assert!(validate_goal_leadership(None, None).is_ok());
     }
-}
-
-/// A goal's own team: `{orchestrator, combo}`.
-pub fn team_of(goal: &OdysseyRecord) -> Option<(TeamLead, Combo)> {
-    let team = goal.team.as_ref()?;
-    let lead: TeamLead = team.get("orchestrator").cloned().and_then(|value| serde_json::from_value(value).ok()).unwrap_or_default();
-    let combo: Combo = team.get("combo").cloned().and_then(|value| serde_json::from_value(value).ok()).unwrap_or_default();
-    Some((lead, combo.normalized()))
 }
