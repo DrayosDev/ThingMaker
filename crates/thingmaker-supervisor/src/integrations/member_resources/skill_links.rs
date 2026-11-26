@@ -42,7 +42,7 @@ fn references(text: &str) -> BTreeSet<(Option<String>, String)> {
     let mut found = BTreeSet::new();
     for pattern in PATTERNS.iter() {
         for capture in pattern.captures_iter(text) {
-            // Sentence punctuation is not part of a name: "then unity-dev:spec."
+            // Sentence punctuation is not part of a name: "then studio:spec."
             let token = capture[1].trim_end_matches(['.', '-', '_']).to_lowercase();
             let reference = match token.split_once(':') {
                 Some((plugin, name)) => (Some(plugin.to_string()), name.to_string()),
@@ -116,8 +116,8 @@ mod tests {
 
     #[test]
     fn only_unmistakable_mentions_are_references() {
-        let found = references("Use the `review` skill, or the skill named `plan`. Call unity-dev:spec. Skills `a` and `b`.");
-        let expected = [(None, "review"), (None, "plan"), (Some("unity-dev"), "spec"), (None, "a")];
+        let found = references("Use the `review` skill, or the skill named `plan`. Call studio:spec. Skills `a` and `b`.");
+        let expected = [(None, "review"), (None, "plan"), (Some("studio"), "spec"), (None, "a")];
         assert_eq!(found, expected.iter().map(|(plugin, name)| (plugin.map(str::to_string), name.to_string())).collect());
         // Each of these was taken for a reference once, and none is one.
         for prose in [
