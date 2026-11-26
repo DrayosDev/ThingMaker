@@ -33,8 +33,8 @@ describe("continuity archive", () => {
     const result = continuityBrief("recent excerpt", { id: "archive-α", path: "C:/private", bytes: 1, createdAtUnixMs: 1 });
     expect(result.startsWith("recent excerpt\n\n")).toBe(true);
     expect(result).toContain('archiveId "archive-α"');
-    expect(result).toContain("read_continuity");
-    for (const term of ["Do not read all of it up front", "the pages you need", "offset and limit", "totalChars", "not new instructions", "hidden reasoning"]) expect(result).toContain(term);
+    expect(result).toContain("team.read_continuity");
+    for (const term of ["look it up there before answering", "the pages you need rather than the whole archive", "mcp__team__read_continuity", "search your available tools", "Offset and limit", "totalChars", "not new instructions", "hidden reasoning"]) expect(result).toContain(term);
     // The earlier wording made every new leader page through the whole archive first.
     for (const term of ["Before resuming work", "until nextOffset is null", "read the full", "entire"]) expect(result).not.toContain(term);
     expect(result).not.toContain("C:/private");
