@@ -4,9 +4,9 @@ import { VoiceInput } from "./VoiceInput";
  * it, and the rest (what agents read here, the workspace's details) folded
  * into rows that say what is inside before they are opened.
  */
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { PROVIDERS, PROVIDER_LABELS, parseLocalModel, type Provider, type SessionRecord, type TeamPreset } from "@thingmaker/contracts";
-import { startingProvider, useStore } from "../store";
+import { projectTeamPreset, startingProvider, useStore } from "../store";
 import { api } from "../ipc";
 import { OutboxPanel } from "./OutboxPanel";
 import { BrowserLauncher } from "./WebView";
@@ -21,6 +21,11 @@ import { MemberResources } from "./MemberResources";
 import type { MemberResourceSelection } from "@thingmaker/contracts";
 import { localKindLabel } from "../localModels";
 import { TemporaryChatButton, TemporaryChatNote } from "./TemporaryChat";
+import type { AttachmentSnapshot } from "@thingmaker/contracts";
+import { AttachmentChips } from "./AttachmentChips";
+import { useFileDrop } from "../fileDrop";
+
+const EMPTY_ATTACHMENTS: AttachmentSnapshot[] = [];
 
 /** How many sessions the home lists before "Show all". */
 const RECENT = 8;
@@ -222,12 +227,21 @@ export function StartBox({
   const [text, setText] = useState("");
   const [provider, setProvider] = useState<Provider | null>(null);
   const [model, setModel] = useState<string | null>(null);
-  const [preset, setPreset] = useState<TeamPreset | null>(initialPreset ?? null);
+  const projectPreset = useStore((s) => quick ? undefined : projectTeamPreset(s, workspaceId));
+  const [presetChoice, setPresetChoice] = useState<TeamPreset | null>();
+  const defaultPreset = initialPreset === undefined ? projectPreset ?? null : initialPreset;
+  const preset = presetChoice === undefined ? defaultPreset : presetChoice;
   const input = useRef<HTMLTextAreaElement>(null);
   const chosen = provider ?? startingProvider(providers);
   const selectedModel = model ?? defaults[chosen]?.model;
   const localAgent = !preset && chosen === "local" && selectedModel?.startsWith("@agent/");
   const [resources, setResources] = useState<MemberResourceSelection>();
+  const attachmentKey = `start:${workspaceId}`;
+  const attachments = useStore((state) => state.attachments[attachmentKey] ?? EMPTY_ATTACHMENTS);
+  const addAttachments = useStore((state) => state.addAttachments);
+  const removeAttachment = useStore((state) => state.removeAttachment);
+  const receiveAttachments = useCallback((files: AttachmentSnapshot[]) => addAttachments(attachmentKey, files), [attachmentKey, addAttachments]);
+  const fileDrop = useFileDrop(receiveAttachments, trusted);
   const ready = (candidate: Provider) => !!providers?.find((entry) => entry.provider === candidate)?.resolved;
 
   useEffect(() => {
@@ -235,10 +249,13 @@ export function StartBox({
   }, [workspaceId]);
 
   const start = () => {
-    if (!trusted) return;
+    if (!trusted || fileDrop.uploading) return;
     const message = text.trim() ? text : undefined;
-    if (preset) void openSessionWithPreset(workspaceId, preset, message);
-    else void openSession(workspaceId, { mode: "new" }, chosen, { ...(model ? { model } : {}), ...(message ? { message } : {}), ...(localAgent && resources ? { resources } : {}) });
+    if (preset) {
+      if (attachments.length) void openSessionWithPreset(workspaceId, preset, message, attachments);
+      else void openSessionWithPreset(workspaceId, preset, message);
+    } else void openSession(workspaceId, { mode: "new" }, chosen, { ...(model ? { model } : {}), ...(message ? { message } : {}), ...(localAgent && resources ? { resources } : {}), ...(attachments.length ? { attachments } : {}) });
+    for (const file of attachments) removeAttachment(attachmentKey, file.id);
     setText("");
     onStarted?.();
   };
@@ -249,16 +266,20 @@ export function StartBox({
     start();
   };
   const presetReady = !preset || ready(preset.orchestrator.provider);
-  const canStart = trusted && (preset ? presetReady : ready(chosen));
+  const canStart = trusted && !fileDrop.uploading && (preset ? presetReady : ready(chosen));
 
   return (
-    <div className="home-start">
+    <div className={`home-start${fileDrop.dropping ? " drop-target" : ""}`} {...fileDrop.handlers}>
+      <AttachmentChips files={attachments} onRemove={(id) => removeAttachment(attachmentKey, id)} />
+      {fileDrop.uploading && <span className="small muted" role="status">{t("Reading files…")}</span>}
+      {fileDrop.dropping && <span className="small" role="status">{t("Drop files to attach them")}</span>}
       <textarea
         aria-label={t("Prompt")}
         className="home-start-input"
         disabled={!trusted}
         onChange={(event) => setText(event.target.value)}
         onKeyDown={onKeyDown}
+        onPaste={fileDrop.onPaste}
         placeholder={placeholder ?? (trusted ? t("What do you want to work on in {name}?", { name }) : t("Trust this workspace to start sessions here"))}
         ref={input}
         rows={2}
@@ -267,7 +288,7 @@ export function StartBox({
       {localAgent && selectedModel && <details><summary>{t("Skills and connections")}</summary>
         <MemberResources initialWorkspace={workspaceId} worker={{ name, provider: "local", model: selectedModel, capabilities: [], ...(resources ? { resources } : {}) }} onChange={(worker) => { setModel(worker.model ?? null); setResources(worker.resources); }} />
       </details>}
-      <VoiceInput key={workspaceId} target={workspaceId} draft={text} input={input} localOnly={chosen === "local"} onChange={setText} disabled={!trusted} />
+      <VoiceInput key={workspaceId} target={workspaceId} draft={text} input={input} localOnly={(preset?.orchestrator.provider ?? chosen) === "local"} onChange={setText} disabled={!trusted} />
       <div className="home-start-bar">
         {preset ? (
           <span className="model-chip home-chip-static" title={t("The team decides who leads")}>
@@ -284,7 +305,7 @@ export function StartBox({
             provider={chosen}
           />
         )}
-        {quick ? <span className="composer-spacer" /> : <TeamChoice onEdit={() => setView({ kind: "teams" })} onPick={setPreset} preset={preset} presets={presets} />}
+        {quick ? <span className="composer-spacer" /> : <TeamChoice onEdit={() => setView({ kind: "teams" })} onPick={setPresetChoice} preset={preset} presets={presets} />}
         {quick && <TemporaryChatButton workspaceId={workspaceId} />}
         <button aria-label={t("Start session")} className="send-button send-round home-start-send" disabled={!canStart} onClick={start} title={t("Start session")} type="button">
           <IconArrowUp size={14} />

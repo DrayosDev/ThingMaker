@@ -9,6 +9,7 @@
  */
 import { create } from "zustand";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import type {
   AmendmentRecord,
   DiffScope,
@@ -61,6 +62,8 @@ import { copiesItself, forkBranch, forkTitle, type ForkPoint } from "./fork";
 const TEAM_PRESETS_KEY = "teamPresets";
 const HELPER_PRESETS_KEY = "helperPresets";
 const DEFAULT_PRESET_KEY = "defaultTeamPreset";
+const PROJECT_TEAM_PRESETS_KEY = "projectTeamPresets";
+let projectTeamWrite = Promise.resolve();
 import { t } from "./i18n";
 import { api } from "./ipc";
 import { notify, shouldNotify } from "./notifications";
@@ -241,7 +244,7 @@ type State = {
   odysseyPlanChanges: Record<string, PlanChangeRecord[]>;
   /** Decisions the agent handed to the user, newest first. */
   odysseyQuestions: Record<string, QuestionRecord[]>;
-  showHidden: boolean;
+  expandedArchives: Record<string, boolean>;
   view: View;
   sessions: Record<string, LiveSession>;
   sessionOrder: string[];
@@ -274,6 +277,9 @@ type State = {
   helperPresets: HelperPreset[];
   /** The preset a new session starts with, when one is chosen. */
   defaultPresetId: string | null;
+  /** The saved team to use for each project's new sessions. */
+  projectTeamPresetIds: Record<string, string>;
+  setProjectTeamPreset: (workspaceId: string, presetId: string | null) => Promise<void>;
   drafts: Record<string, string>;
   /** The provider sign-in in progress, if any. */
   signIn: SignInRun | null;
@@ -468,7 +474,7 @@ type State = {
   /** Makes a preset (or none) what a new session starts with. */
   setDefaultPreset: (id: string | null) => Promise<void>;
   /** Starts a session led by the preset's orchestrator, with its workers. */
-  openSessionWithPreset: (workspaceId: string, preset: TeamPreset, message?: string) => Promise<void>;
+  openSessionWithPreset: (workspaceId: string, preset: TeamPreset, message?: string, attachments?: AttachmentSnapshot[]) => Promise<void>;
   /**
    * Applies a preset to a live session. Workers change at once; the
    * orchestrator's model and effort are set through its own options. A
@@ -537,7 +543,7 @@ type State = {
   noteClaudeLimit: (message: string | null | undefined) => boolean;
   /** Asks the Claude account whether it has room, without spending a turn. */
   refreshClaudeUsage: () => Promise<UsageSnapshot | null>;
-  setShowHidden: (show: boolean) => void;
+  toggleArchiveList: (workspaceId: string) => void;
   /** Opens or resumes a session. A resume runs on the provider that wrote it; a new one on `provider`, else the last one used. */
   openSession: (workspaceId: string, mode: OpenMode, provider?: Provider, launch?: NewSessionLaunch) => Promise<void>;
   /** Opens a fresh session on a named agent and returns how to address it. */
@@ -746,7 +752,7 @@ function launchDefaults(defaults: SessionDefaults, provider: Provider): { model?
  * override the remembered ones, a team, and a first message that goes out as
  * soon as the agent is ready.
  */
-export type NewSessionLaunch = { resources?: WorkerSlot["resources"]; model?: string; reasoningEffort?: string; combo?: Combo; message?: string };
+export type NewSessionLaunch = { resources?: WorkerSlot["resources"]; model?: string; reasoningEffort?: string; combo?: Combo; message?: string; attachments?: AttachmentSnapshot[] };
 
 /** The adapter's alias for its current Opus. */
 const CLAUDE_DEFAULT_MODEL = "opus";
@@ -772,6 +778,12 @@ export function readSessionDefaults(raw: unknown): SessionDefaults {
   const defaults: SessionDefaults = {};
   for (const provider of PROVIDERS) if (value[provider]) defaults[provider] = pick(value[provider]);
   return defaults;
+}
+
+/** Resolves the current preset, so edits take effect and deleted teams fall back to one agent. */
+export function projectTeamPreset(state: Pick<State, "projectTeamPresetIds" | "teamPresets" | "quickChats">, workspaceId: string): TeamPreset | undefined {
+  if (state.quickChats.some((chat) => chat.workspaceId === workspaceId)) return undefined;
+  return state.teamPresets.find((preset) => preset.id === state.projectTeamPresetIds[workspaceId]);
 }
 
 /** Where a new session starts when nobody asked for a provider: Claude when it can run, else the first that can. */
@@ -1032,7 +1044,7 @@ export const useStore = create<State>((set, get) => ({
   odysseyMovedAway: {},
   odysseyPlanChanges: {},
   odysseyQuestions: {},
-  showHidden: false,
+  expandedArchives: {},
   view: { kind: "welcome" },
   sessions: {},
   sessionOrder: [],
@@ -1051,6 +1063,7 @@ export const useStore = create<State>((set, get) => ({
   teamPresets: [],
   helperPresets: [],
   defaultPresetId: null,
+  projectTeamPresetIds: {},
   signIn: null,
   accounts: {},
   starting: null,
@@ -1084,7 +1097,7 @@ export const useStore = create<State>((set, get) => ({
 
   async bootstrap() {
     try {
-      const [profiles, workspaces] = await Promise.all([api.executionProfiles(), api.workspaceList()]);
+      const [profiles, workspaces] = await Promise.all([api.executionProfiles(), api.workspaceList(), get().loadTeamPresets()]);
       set({ profiles, workspaces });
       void get().loadSettings();
       void get().loadUiPrefs();
@@ -1118,15 +1131,37 @@ export const useStore = create<State>((set, get) => ({
       // to the conversation it had open.
       const rehydrated = get().rehydrate();
       void get().loadDefaultCombo();
-      // Both accounts' usage for the sidebar, now and every five minutes: the
-      // sessions report it too, but only while one is running.
+      // Refresh sidebar usage when the Windows app is active. The host also
+      // checks foreground ownership before starting a CLI, including for calls from the phone.
+      const usageInterval = 5 * 60_000;
       const readUsage = () => {
-        // Local Models are free: there is no usage to read.
         for (const provider of PROVIDERS) if (provider !== "local") void get().refreshUsage(provider);
       };
-      readUsage();
-      setInterval(readUsage, 5 * 60_000);
-      void get().loadTeamPresets();
+      if (!IS_REMOTE && navigator.userAgent.includes("Windows")) {
+        let nextUsagePoll = 0;
+        let usageTimer: ReturnType<typeof setTimeout>;
+        const pollWhileFocused = () => {
+          clearTimeout(usageTimer);
+          const now = Date.now();
+          if (now >= nextUsagePoll) {
+            nextUsagePoll = now + usageInterval;
+            readUsage();
+          }
+          usageTimer = setTimeout(pollWhileFocused, nextUsagePoll - now);
+        };
+        const appWindow = getCurrentWindow();
+        let focusReported = false;
+        void appWindow.onFocusChanged(({ payload: focused }) => {
+          focusReported = true;
+          if (focused) pollWhileFocused();
+          else clearTimeout(usageTimer);
+        }).then(async () => {
+          if (await appWindow.isFocused() && !focusReported) pollWhileFocused();
+        }).catch(() => undefined);
+      } else {
+        readUsage();
+        setInterval(readUsage, usageInterval);
+      }
       void get().loadQuickChats();
       void listen<JobView>(JOB_EVENT, (event) => get().noteJob(event.payload));
       void listen<UltraReview>(ULTRA_REVIEW_EVENT, (event) => get().noteUltraReview(event.payload));
@@ -1357,8 +1392,10 @@ export const useStore = create<State>((set, get) => ({
     try {
       const quota = await api.providerQuota(provider);
       // A reading is for the account it was asked about, or it is not one.
-      if (!quota || quota.provider !== provider) throw new Error("no reading");
-      get().noteQuota(quota);
+      if (quota) {
+        if (quota.provider !== provider) throw new Error("reading for another provider");
+        get().noteQuota(quota);
+      }
     } catch {
       // A reading that cannot be taken leaves the last one in place; it is
       // evidence, never a decision. Claude's refusal-based reading is the
@@ -2008,8 +2045,10 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
-  setShowHidden(show) {
-    set({ showHidden: show });
+  toggleArchiveList(workspaceId) {
+    set((state) => ({
+      expandedArchives: { ...state.expandedArchives, [workspaceId]: !state.expandedArchives[workspaceId] },
+    }));
   },
 
   /**
@@ -2460,14 +2499,17 @@ export const useStore = create<State>((set, get) => ({
   },
 
   async openSession(workspaceId, mode, provider, launch) {
+    if (mode.mode === "new" && provider === undefined && launch === undefined) {
+      const preset = projectTeamPreset(get(), workspaceId);
+      if (preset) return get().openSessionWithPreset(workspaceId, preset);
+    }
     // Which program wrote this session decides which one can resume it. The
     // record knows, and the native side reads it again on a resume: launching
     // one provider against another's session id would ask the wrong program
     // for a session it has never heard of.
     const recorded = mode.mode === "resume" ? (get().records[workspaceId] ?? []).find((record) => record.agentSessionId === mode.session_id)?.provider : undefined;
     const defaults = get().sessionDefaults;
-    // A new session starts with no team, on the default model: a team is
-    // chosen from the composer's "Set team", or a preset is opened directly.
+    // Without a project team or an explicit preset, new sessions use the default model.
     // A session the app is already running — a worker a delegation opened —
     // is shown, not resumed: a second process on the same session is refused
     // by the agent, and would compete with the first one if it were not.
@@ -2487,21 +2529,25 @@ export const useStore = create<State>((set, get) => ({
       workspaceId,
       provider: chosen,
       draft: message,
-      queued: !!message,
+      queued: !!message || !!launch?.attachments?.length,
       ...(mode.mode === "resume" ? { resuming: true, ...(title ? { title } : {}) } : {}),
     };
     set({ starting, view: { kind: "starting" }, error: null, lockedResume: null });
+    if (launch?.attachments?.length) get().addAttachments(starting.id, launch.attachments);
     // The chat gives way to the session once it is attached, unless the
     // person went elsewhere meanwhile; what was written carries over.
     const settle = (handleId: string) => {
       const waited = get().starting;
       if (waited?.id !== starting.id) return;
       if (get().view.kind === "starting") get().selectSession(handleId);
-      set({ starting: null });
+      const files = get().attachments[starting.id] ?? [];
+      if (files.length) get().addAttachments(handleId, files);
+      const { [starting.id]: _transferred, ...attachments } = get().attachments;
+      set({ starting: null, attachments });
       if (waited.draft) {
         get().setDraft(handleId, waited.draft);
-        if (waited.queued) void get().send(handleId);
       }
+      if (waited.queued && (waited.draft.trim() || files.length)) void get().send(handleId);
     };
     if (mode.mode === "resume") {
       try {
@@ -2984,15 +3030,38 @@ export const useStore = create<State>((set, get) => ({
 
   async loadTeamPresets() {
     try {
-      const [presets, defaultId] = await Promise.all([api.prefGet<unknown>(TEAM_PRESETS_KEY), api.prefGet<string>(DEFAULT_PRESET_KEY)]);
-      const list = readPresets(presets);
-      set({ teamPresets: list, defaultPresetId: null });
-      // New sessions no longer start on a team: a default left from before
-      // is cleared, with the host's default workers it implied.
+      const previousProjectTeams = get().projectTeamPresetIds;
+      const [presets, defaultId, savedProjectTeams] = await Promise.all([
+        api.prefGet<unknown>(TEAM_PRESETS_KEY),
+        api.prefGet<string>(DEFAULT_PRESET_KEY),
+        api.prefGet<unknown>(PROJECT_TEAM_PRESETS_KEY).catch(() => undefined),
+      ]);
+      const projectTeams = savedProjectTeams && typeof savedProjectTeams === "object" && !Array.isArray(savedProjectTeams)
+        ? Object.fromEntries(Object.entries(savedProjectTeams).filter((entry): entry is [string, string] => typeof entry[1] === "string"))
+        : {};
+      set((state) => ({
+        teamPresets: readPresets(presets),
+        defaultPresetId: null,
+        ...(savedProjectTeams !== undefined && state.projectTeamPresetIds === previousProjectTeams ? { projectTeamPresetIds: projectTeams } : {}),
+      }));
+      // Clear the older global default and the host's default workers it implied.
       if (typeof defaultId === "string" && defaultId) void get().setDefaultPreset(null);
     } catch {
       // No presets yet.
     }
+  },
+
+  setProjectTeamPreset(workspaceId, presetId) {
+    // Each write starts from the last saved map, including changes to other projects.
+    projectTeamWrite = projectTeamWrite.then(async () => {
+      const projectTeamPresetIds = { ...get().projectTeamPresetIds };
+      if (presetId === null) delete projectTeamPresetIds[workspaceId];
+      else if (get().teamPresets.some((preset) => preset.id === presetId)) projectTeamPresetIds[workspaceId] = presetId;
+      else return;
+      await api.prefSet(PROJECT_TEAM_PRESETS_KEY, projectTeamPresetIds);
+      set({ projectTeamPresetIds });
+    }).catch((error) => set({ error: asError(error) }));
+    return projectTeamWrite;
   },
 
   async saveTeamPreset(preset) {
@@ -3085,7 +3154,7 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
-  async openSessionWithPreset(workspaceId, preset, message) {
+  async openSessionWithPreset(workspaceId, preset, message, attachments) {
     const { provider, model, effort, resources } = preset.orchestrator;
     await get().openSession(workspaceId, { mode: "new" }, provider, {
       ...(model ? { model } : {}),
@@ -3093,6 +3162,7 @@ export const useStore = create<State>((set, get) => ({
       combo: preset.combo,
       ...(resources ? { resources } : {}),
       ...(message ? { message } : {}),
+      ...(attachments?.length ? { attachments } : {}),
     });
   },
 
@@ -3207,7 +3277,10 @@ export const useStore = create<State>((set, get) => ({
       // The composer's own state rides along, so taking the prompt back out
       // to edit restores its chips too, from this window or the phone.
       const brief = get().sideBrief[sessionId];
-      await api.sessionEnqueue(session.handle, requestId, brief ? `${brief}${HANDOFF_SPLIT}${draft}` : draft, attachments.map((a) => a.id), mentions, { attachments, mentions });
+      const restoreAttachments = attachments.map((attachment) => attachment.document
+        ? { ...attachment, document: { ...attachment.document, text: "" } }
+        : attachment);
+      await api.sessionEnqueue(session.handle, requestId, brief ? `${brief}${HANDOFF_SPLIT}${draft}` : draft, attachments.map((a) => a.id), mentions, { attachments: restoreAttachments, mentions });
       if (brief) {
         const { [sessionId]: _sent, ...rest } = get().sideBrief;
         set({ sideBrief: rest });
