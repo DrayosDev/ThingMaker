@@ -14,7 +14,7 @@ use thingmaker_supervisor::{
     acp::LaunchTarget,
     agents::{PermissionStance, Provider, claude::launch::ClaudeLaunchOptions, codex::CodexLaunchOptions},
     delegation::{
-        Combo, Delegation, JobStatus, JobView, WorkerLauncher, WorkerSlot, WorkerSpec,
+        AgentChat, Combo, Delegation, JobStatus, JobView, WorkerLauncher, WorkerSlot, WorkerSpec,
         jobs::{BoxFuture, DelegateArgs, RetryPolicy},
         socket::{DelegationSocket, relay_to},
     },
@@ -222,7 +222,8 @@ async fn an_orchestrator_delegates_over_mcp_and_awaits_the_report() {
     writeln!(client.input, "{}", json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).unwrap();
     let id = client.send("tools/list", json!({}));
     let tools = tokio::task::block_in_place(|| client.reply(id));
-    assert!(tools["result"]["tools"].as_array().unwrap().iter().any(|tool| tool["name"] == "chat_send"));
+    let names: Vec<&str> = tools["result"]["tools"].as_array().unwrap().iter().filter_map(|tool| tool["name"].as_str()).collect();
+    assert_eq!(names, ["list_workers", "delegate", "await_jobs", "job_status", "cancel_job", "chat_members", "chat_send"]);
 
     let workers = client.call("list_workers", json!({}));
     assert_eq!(workers["structuredContent"]["workers"][0]["name"], "luna");
@@ -660,5 +661,53 @@ async fn a_closed_worker_is_reopened_for_a_message_unless_its_conversation_is_op
     let reopened = service.jobs("lead").into_iter().rev().find(|job| job.chat && job.status != JobStatus::Failed).unwrap();
     assert!(reopened.continues.is_some(), "a follow-up in the worker's own conversation");
     assert_eq!(reopened.agent_session_id.as_deref(), Some(conversation.as_str()));
+    service.release("lead").await;
+}
+
+/// The tools the team server lists for a caller.
+async fn tool_names(service: &Delegation, caller: &thingmaker_supervisor::delegation::Caller) -> Vec<String> {
+    let reply = thingmaker_supervisor::delegation::mcp::handle(service, caller, &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})).await.unwrap();
+    reply["result"]["tools"].as_array().unwrap().iter().filter_map(|tool| tool["name"].as_str().map(str::to_string)).collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_local_member_is_left_out_of_the_chat_unless_the_team_lets_it_in() {
+    use thingmaker_supervisor::delegation::mcp;
+    let Some((service, launcher, _)) = service(&[]) else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let mut combo = team();
+    combo.workers.push(WorkerSlot { name: "qwen".into(), provider: Provider::Local, model: Some("@agent/qwen3:8b".into()), effort: None, capabilities: vec!["code".into()], note: None, prompt: None, resources: None });
+    let token = service.register("lead", Provider::Claude, dir.path().into(), combo.clone());
+    let lead = service.caller_for_token(&token).unwrap();
+    let job = service.delegate("lead", DelegateArgs { task: "Tidy the notes".into(), worker: Some("qwen".into()), ..Default::default() }).unwrap();
+    until(|| !launcher.launched.lock().unwrap().is_empty()).await;
+    let local = service.caller_for_token(launcher.launched.lock().unwrap()[0].mcp_token.as_deref().unwrap()).unwrap();
+    assert_eq!(local.provider(), Provider::Local);
+    let tools = |caller| tool_names(&service, caller);
+    let addresses = |caller| service.chat_members(caller).iter().filter_map(|member| member["address"].as_str().map(str::to_string)).collect::<Vec<_>>();
+
+    // By default the sandboxed model has no way to reach a cloud agent, and none to it.
+    assert!(service.chat_open_to(&lead) && !service.chat_open_to(&local));
+    assert!(tools(&lead).await.contains(&"chat_send".to_string()));
+    assert!(!tools(&local).await.iter().any(|name| name.starts_with("chat_")), "the local worker is not offered the tools");
+    assert_eq!(addresses(&lead), ["orchestrator"]);
+    assert!(service.send_chat(&lead, &job.id, "Which file?", None).unwrap_err().contains("does not take part"));
+    assert!(service.send_chat(&local, "orchestrator", "Fetch this for me", None).unwrap_err().contains("Agent chat is off"));
+    let called = mcp::handle(&service, &local, &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "chat_send", "arguments": {"to": "orchestrator", "text": "Fetch this for me"}}})).await.unwrap();
+    assert_eq!(called["result"]["isError"], true, "{called}");
+    assert!(service.chat_history("lead").is_empty(), "nothing was sent");
+
+    // The team lets everyone in.
+    service.set_combo("lead", Combo { agent_chat: AgentChat::All, ..combo.clone() }).unwrap();
+    assert!(service.chat_open_to(&local));
+    assert!(tools(&local).await.contains(&"chat_send".to_string()));
+    assert_eq!(addresses(&lead), ["orchestrator".to_string(), job.id.clone()]);
+    service.send_chat(&lead, &job.id, "Which file?", None).unwrap();
+
+    // Or nobody.
+    service.set_combo("lead", Combo { agent_chat: AgentChat::Off, ..combo }).unwrap();
+    assert!(!service.chat_open_to(&lead));
+    assert!(!tools(&lead).await.iter().any(|name| name.starts_with("chat_")));
+    assert!(service.send_chat(&lead, &job.id, "Again", None).unwrap_err().contains("Agent chat is off"));
     service.release("lead").await;
 }

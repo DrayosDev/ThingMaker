@@ -6,6 +6,9 @@ use std::collections::HashSet;
 
 const LEAD: &str = "orchestrator";
 
+/// What a member the team's setting leaves out of the chat is told.
+const CHAT_CLOSED: &str = "Agent chat is off for this member of the team. Say it in your report to the orchestrator instead.";
+
 /// Workers answering a chat message at once. These jobs are apart from the
 /// orchestrator's own ([`MAX_RUNNING_JOBS`]): a busy chat must not leave it
 /// unable to delegate.
@@ -19,7 +22,7 @@ pub(super) struct Room {
     pub(super) closing: HashSet<String>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
     pub id: usize,
@@ -49,14 +52,29 @@ impl Delegation {
             .unwrap_or_default()
     }
 
+    /// Whether the team lets this caller use the chat at all
+    /// ([`AgentChat`](crate::delegation::AgentChat)). A caller it leaves out
+    /// is not offered the tools.
+    pub fn chat_open_to(&self, caller: &Caller) -> bool {
+        self.state().orchestrators.get(caller.orchestrator()).is_some_and(|team| team.combo.agent_chat.includes(caller.provider()))
+    }
+
+    /// The participants the caller may write to: the members the team's
+    /// setting lets into the chat.
     pub fn chat_members(&self, caller: &Caller) -> Vec<Value> {
         let state = self.state();
-        let mut members = vec![json!({"address": LEAD, "name": "Orchestrator"})];
+        let Some(team) = state.orchestrators.get(caller.orchestrator()) else { return Vec::new() };
+        let open = team.combo.agent_chat;
+        let mut members = Vec::new();
+        if open.includes(team.provider) {
+            members.push(json!({"address": LEAD, "name": "Orchestrator", "provider": team.provider.as_str()}));
+        }
         for id in state.order.get(caller.orchestrator()).into_iter().flatten() {
             if let Some(job) = state.jobs.get(id)
                 && job.address == *id
+                && open.includes(job.slot.provider)
             {
-                members.push(json!({"address": id, "name": job.slot.name}));
+                members.push(json!({"address": id, "name": job.slot.name, "provider": job.slot.provider.as_str()}));
             }
         }
         members
@@ -71,6 +89,7 @@ impl Delegation {
         let (message, start, generation) = {
             let mut state = self.state();
             let worker = |id: &str| state.jobs.get(id).filter(|job| job.view.orchestrator == session);
+            let (lead, open) = state.orchestrators.get(session).map(|team| (team.provider, team.combo.agent_chat)).ok_or("Session ended.")?;
             let (from, from_name) = match caller {
                 Caller::Orchestrator { .. } => (LEAD.to_string(), "Orchestrator".into()),
                 Caller::Worker { job_id, .. } => {
@@ -78,14 +97,20 @@ impl Delegation {
                     (job.address.clone(), job.slot.name.clone())
                 }
             };
-            let (to, to_name) = if to == LEAD {
-                (LEAD.to_string(), "Orchestrator".into())
+            if !open.includes(caller.provider()) {
+                return Err(CHAT_CLOSED.into());
+            }
+            let (to, to_name, to_provider) = if to == LEAD {
+                (LEAD.to_string(), "Orchestrator".to_string(), lead)
             } else {
                 let job = worker(to).ok_or("Unknown address. Use chat_members for this session's addresses.")?;
-                (job.address.clone(), job.slot.name.clone())
+                (job.address.clone(), job.slot.name.clone(), job.slot.provider)
             };
             if from == to {
                 return Err("Choose another member of the session.".into());
+            }
+            if !open.includes(to_provider) {
+                return Err(format!("{to_name} does not take part in this team's chat. Say it in your report to the orchestrator instead."));
             }
             let team = state
                 .orchestrators
@@ -171,9 +196,15 @@ impl Delegation {
                     .get(session)
                     .filter(|team| team.token == generation)
                     .ok_or("Session ended.")?;
+                // The team's setting is read again here: it may have been
+                // turned off since the message was sent.
+                let open = team.combo.agent_chat;
                 if team.chat.closing.contains(&message.to) {
                     (None, None)
                 } else if message.to == LEAD {
+                    if !open.includes(team.provider) {
+                        return Err(CHAT_CLOSED.into());
+                    }
                     (Some(team.chat.lead.clone().ok_or("Lead is not attached.")?), None)
                 } else {
                     let record = state
@@ -185,6 +216,9 @@ impl Delegation {
                         .filter_map(|id| state.jobs.get(id))
                         .find(|r| r.address == message.to)
                         .ok_or("Worker is gone.")?;
+                    if !open.includes(record.slot.provider) {
+                        return Err(CHAT_CLOSED.into());
+                    }
                     (record.actor.clone(), Some(record.view.clone()))
                 }
             };

@@ -764,8 +764,8 @@ impl Delegation {
         if chat_message.is_some() {
             prompt = task.to_string();
         }
-        if slot.provider == Provider::Gemini {
-            let caller = Caller::Worker { orchestrator: session.into(), root: root.clone(), name: slot.name.clone(), provider: slot.provider, job_id: view.id.clone() };
+        let caller = Caller::Worker { orchestrator: session.into(), root: root.clone(), name: slot.name.clone(), provider: slot.provider, job_id: view.id.clone() };
+        if slot.provider == Provider::Gemini && self.chat_open_to(&caller) {
             let members = serde_json::Value::Array(self.chat_members(&caller));
             prompt.push_str(&format!("\nTeam chat addresses: {members}. To send or reply, finish with a line TEAM_CHAT followed by a JSON object with string fields to and text, and optional numeric reply_to."));
         }

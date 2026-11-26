@@ -8,7 +8,7 @@
  * file's extra fields are ignored) and strict about what a team needs, so a
  * hand-edited file either imports cleanly or says what is wrong with it.
  */
-import { PROVIDERS, type Combo, type OrchestratorChoice, type Provider, type TeamPreset, type WorkerSlot } from "@thingmaker/contracts";
+import { DEFAULT_AGENT_CHAT, PROVIDERS, type Combo, type OrchestratorChoice, type Provider, type TeamPreset, type WorkerSlot } from "@thingmaker/contracts";
 import { t } from "./i18n";
 import { newPreset, uniqueName, type HelperPreset } from "./team";
 
@@ -31,7 +31,7 @@ export function exportTeams(presets: readonly TeamPreset[], helpers: readonly He
     format: TEAMS_FORMAT,
     version: presets.some((preset) => preset.orchestrator.resources !== undefined || preset.combo.workers.some((worker) => worker.resources !== undefined)) || helpers.some((helper) => helper.worker.resources !== undefined) ? TEAMS_VERSION : 1,
     exportedAt: now.toISOString(),
-    teams: presets.map((preset) => ({ name: preset.name, orchestrator: { ...preset.orchestrator }, combo: { workers: preset.combo.workers.map((worker) => ({ ...worker })), nativeSubagents: preset.combo.nativeSubagents } })),
+    teams: presets.map((preset) => ({ name: preset.name, orchestrator: { ...preset.orchestrator }, combo: { workers: preset.combo.workers.map((worker) => ({ ...worker })), nativeSubagents: preset.combo.nativeSubagents, ...(preset.combo.agentChat && preset.combo.agentChat !== DEFAULT_AGENT_CHAT ? { agentChat: preset.combo.agentChat } : {}) } })),
     ...(helpers.length > 0 ? { helpers: helpers.map((helper) => ({ ...helper.worker, name: helper.name })) } : {}),
   };
   return `${JSON.stringify(file, null, 2)}\n`;
@@ -113,7 +113,9 @@ export function readTeamsFile(raw: string): TeamsFileContent {
       if (names.has(worker.name.toLowerCase())) throw new Error(t("{where}: two helpers are called “{name}”.", { where, name: worker.name }));
       names.add(worker.name.toLowerCase());
     }
-    return { name, orchestrator, combo: { workers, nativeSubagents: combo?.nativeSubagents === true } };
+    // Anything but the two settings a file may ask for reads as the default.
+    const agentChat = combo?.agentChat === "off" || combo?.agentChat === "all" ? { agentChat: combo.agentChat } : {};
+    return { name, orchestrator, combo: { workers, nativeSubagents: combo?.nativeSubagents === true, ...agentChat } };
   });
   return { teams, helpers };
 }

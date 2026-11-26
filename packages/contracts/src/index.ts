@@ -549,12 +549,29 @@ export type MemberMcpDependency = { name: string; evidence: "declared" | "refere
 export type MemberResourceEntry = { id: string; kind: "skill" | "mcp"; name: string; description: string; group: string; source?: string; target?: string; available: boolean; problem: string | null; mcpDependencies?: MemberMcpDependency[]; dependencyNotes?: string[] };
 export type MemberResourceCatalog = { entries: MemberResourceEntry[]; notes: string[]; problem: string | null };
 
+/**
+ * Who on a team may message the others directly: nobody, its members on
+ * cloud providers, or everyone. A local model runs sandboxed and offline, and
+ * a message to a cloud member is a way out of that, so it is left out unless
+ * the team says `all`.
+ */
+export type AgentChat = "off" | "cloud" | "all";
+export const DEFAULT_AGENT_CHAT: AgentChat = "cloud";
+
 /** The team behind one orchestrator session. */
 export type Combo = {
   workers: WorkerSlot[];
   /** Whether the orchestrator may also start its own provider's subagents. Read at session start. */
   nativeSubagents: boolean;
+  /** Who may use the team chat; absent is the default, cloud members only. */
+  agentChat?: AgentChat;
 };
+
+/** A team with its chat setting changed; the default is left out, as the host stores it. */
+export function withAgentChat(combo: Combo, agentChat: AgentChat): Combo {
+  const { agentChat: _previous, ...rest } = combo;
+  return agentChat === DEFAULT_AGENT_CHAT ? rest : { ...rest, agentChat };
+}
 
 export const EMPTY_COMBO: Combo = { workers: [], nativeSubagents: false };
 
