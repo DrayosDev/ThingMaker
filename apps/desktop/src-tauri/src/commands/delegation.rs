@@ -228,6 +228,12 @@ impl WorkerLauncher for HostLauncher {
         })
     }
 
+    /// The guard a resume from the sidebar gets (`session_open`), for a
+    /// worker reopened to take a chat message.
+    fn attached(&self, agent_session_id: &str) -> bool {
+        self.app.try_state::<AppState>().is_some_and(|state| state.conversation_attached(agent_session_id))
+    }
+
     fn released(&self, worker_handle: &str) {
         if let Some(state) = self.app.try_state::<AppState>() {
             // A closed worker's session is archived: its job is over, and the

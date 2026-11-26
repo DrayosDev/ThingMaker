@@ -382,7 +382,7 @@ pub async fn session_open(request: OpenRequest, state: State<'_, AppState>) -> C
     // By the handle, and by the agent's own id: a worker opened by a
     // delegation is addressed by a reserved handle, and resuming its id would
     // start a second process on a session the first one is still writing.
-    let running_elsewhere = matches!(&request.mode, OpenRequestMode::Resume { session_id } if state.actor_ids().iter().any(|id| state.agent_session_id(id) == *session_id));
+    let running_elsewhere = matches!(&request.mode, OpenRequestMode::Resume { session_id } if state.conversation_attached(session_id));
     if state.actor(session_id.as_str()).is_some() || running_elsewhere {
         return Err(DesktopError::conflict(
             "This session is already attached in this application. Use the existing attachment instead of starting a second agent process.",

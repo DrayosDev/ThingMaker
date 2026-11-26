@@ -44,6 +44,8 @@ struct MockLauncher {
     claude_flags: Vec<String>,
     launched: Mutex<Vec<WorkerSpec>>,
     released: Mutex<Vec<String>>,
+    /// Conversations the host has open in a session of the person's own.
+    open_elsewhere: Mutex<Vec<String>>,
     /// When set, each revision checks that the service's state is free.
     probe: std::sync::OnceLock<Delegation>,
     revisions_under_lock: std::sync::atomic::AtomicUsize,
@@ -72,6 +74,7 @@ impl WorkerLauncher for MockLauncher {
                 let mut prefix = vec![fixture("mock-claude-acp.py")];
                 prefix.extend(self.claude_flags.iter().cloned());
                 let mut options = ClaudeLaunchOptions::new(&spec.root, python.clone(), prefix);
+                options.resume = spec.resume.clone();
                 options.model = spec.slot.model.clone();
                 options.permission_mode = PermissionStance::AcceptEdits;
                 (LaunchTarget::executable(python), AgentLaunch::Claude(options))
@@ -110,6 +113,10 @@ impl WorkerLauncher for MockLauncher {
     fn released(&self, worker_handle: &str) {
         self.released.lock().unwrap().push(worker_handle.to_string());
     }
+
+    fn attached(&self, agent_session_id: &str) -> bool {
+        self.open_elsewhere.lock().unwrap().iter().any(|open| open == agent_session_id)
+    }
 }
 
 fn team() -> Combo {
@@ -130,7 +137,7 @@ fn service(codex_flags: &[&str]) -> Option<(Delegation, Arc<MockLauncher>, Heard
 }
 
 fn service_with_flags(codex_flags: &[&str], claude_flags: &[&str]) -> Option<(Delegation, Arc<MockLauncher>, Heard)> {
-    let launcher = Arc::new(MockLauncher { python: python()?, claude_flags: claude_flags.iter().map(|f| f.to_string()).collect(), codex_flags: codex_flags.iter().map(|f| f.to_string()).collect(), launched: Mutex::default(), released: Mutex::default(), probe: Default::default(), revisions_under_lock: Default::default() });
+    let launcher = Arc::new(MockLauncher { python: python()?, claude_flags: claude_flags.iter().map(|f| f.to_string()).collect(), codex_flags: codex_flags.iter().map(|f| f.to_string()).collect(), launched: Mutex::default(), released: Mutex::default(), open_elsewhere: Mutex::default(), probe: Default::default(), revisions_under_lock: Default::default() });
     let changes = Arc::new(Mutex::new(Vec::new()));
     let seen = changes.clone();
     let delegation = Delegation::new(launcher.clone(), move |job: &JobView| seen.lock().unwrap().push(job.clone()));
@@ -611,5 +618,47 @@ async fn a_job_a_chat_message_started_takes_none_of_the_orchestrators_slots() {
     assert!(refused.contains("6 jobs are already running"), "{refused}");
     assert!(service.jobs("lead").iter().any(|job| job.chat && !job.status.is_finished()), "the chat job was running all along");
     assert_eq!(own.len(), 6);
+    service.release("lead").await;
+}
+
+/// The last message of the session's chat, once it has been delivered or has failed.
+async fn settled(service: &Delegation, session: &str) -> thingmaker_supervisor::delegation::jobs::chat::Message {
+    until(|| service.chat_history(session).last().is_some_and(|message| message.delivered || message.error.is_some())).await;
+    service.chat_history(session).pop().unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_closed_worker_is_reopened_for_a_message_unless_its_conversation_is_open_elsewhere() {
+    let Some((service, launcher, _)) = service(&[]) else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let token = service.register("lead", Provider::Claude, dir.path().into(), team());
+    let lead = service.caller_for_token(&token).unwrap();
+    let first = service.delegate("lead", DelegateArgs { task: "Read the brief".into(), worker: Some("sonnet".into()), ..Default::default() }).unwrap();
+    let done = service.await_jobs("lead", std::slice::from_ref(&first.id), Duration::from_secs(30), false).await.unwrap();
+    let conversation = done[0].agent_session_id.clone().unwrap();
+    service.set_worker_idle(Duration::ZERO);
+    service.reap_idle().await;
+    service.set_worker_idle(Duration::from_secs(300));
+    assert!(service.job("lead", &first.id).unwrap().worker_closed);
+
+    // The person has opened the closed worker's conversation themselves.
+    launcher.open_elsewhere.lock().unwrap().push(conversation.clone());
+    service.send_chat(&lead, &first.id, "Which file?", None).unwrap();
+    let refused = settled(&service, "lead").await;
+    assert!(!refused.delivered);
+    assert!(refused.error.as_deref().unwrap().contains("open in another ThingMaker session"), "{:?}", refused.error);
+    assert_eq!(launcher.launched.lock().unwrap().len(), 1, "no second process on that conversation");
+
+    // Closed there, the next message reopens it with its context.
+    launcher.open_elsewhere.lock().unwrap().clear();
+    service.send_chat(&lead, &first.id, "Which file, then?", None).unwrap();
+    let delivered = settled(&service, "lead").await;
+    assert!(delivered.delivered, "{:?}", delivered.error);
+    let specs = launcher.launched.lock().unwrap().clone();
+    assert_eq!(specs.len(), 2);
+    assert_eq!(specs[1].resume.as_deref(), Some(conversation.as_str()));
+    let reopened = service.jobs("lead").into_iter().rev().find(|job| job.chat && job.status != JobStatus::Failed).unwrap();
+    assert!(reopened.continues.is_some(), "a follow-up in the worker's own conversation");
+    assert_eq!(reopened.agent_session_id.as_deref(), Some(conversation.as_str()));
     service.release("lead").await;
 }

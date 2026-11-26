@@ -210,7 +210,17 @@ pub trait WorkerLauncher: Send + Sync {
     }
     /// A worker the service has stopped; the host drops its registration.
     fn released(&self, worker_handle: &str);
+    /// Whether the host already has a live attachment on this conversation,
+    /// by the id its provider keeps it under. A closed worker's conversation
+    /// is an ordinary session the person can open; reopening it for a chat
+    /// message then would start a second process writing the same transcript.
+    fn attached(&self, _agent_session_id: &str) -> bool {
+        false
+    }
 }
+
+/// What a message says when its recipient's conversation is open elsewhere.
+pub const WORKER_OPEN_ELSEWHERE: &str = "This worker's conversation is open in another ThingMaker session, so it was not reopened. Close that session, or write to the worker there.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -839,6 +849,10 @@ impl Delegation {
             let worker = match actor.take() {
                 Some(worker) => worker,
                 None => {
+                    if spec.resume.as_deref().is_some_and(|conversation| self.inner.launcher.attached(conversation)) {
+                        self.finish(&job_id, JobStatus::Failed, None, Some(WORKER_OPEN_ELSEWHERE.into()));
+                        return;
+                    }
                     // A queued/rerouted job may now use a different account or
                     // config than when it was accepted. Record the launch's
                     // revision, not the stale scheduling-time revision.
