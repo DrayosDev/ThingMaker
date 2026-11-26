@@ -91,7 +91,7 @@ export function AgentsPane({ sessionId }: { sessionId: string }) {
 
   return (
     <div className="agents-pane">
-      <TeamChat key={session.handle.id} handle={session.handle} />
+      <TeamChat key={sessionId} sessionId={sessionId} />
       <JobsSection sessionId={sessionId} />
       <section>
         <h3>{t("Subagents")}</h3>

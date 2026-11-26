@@ -2071,6 +2071,7 @@ export type CommandName = (typeof COMMANDS)[keyof typeof COMMANDS];
 
 
 
+/** One message between two agents of a session. */
 export interface TeamChatMessage {
   id: number;
   from: string;
@@ -2083,3 +2084,23 @@ export interface TeamChatMessage {
   delivered: boolean;
   error: string | null;
 }
+
+/**
+ * Why a session's agents can send no more: `paused` after too many messages
+ * in a row started work without the person writing (it resumes when they
+ * do), `full` once the session's total is spent.
+ */
+export type TeamChatStop = "paused" | "full";
+
+/** A session's agent chat as the host reports it. */
+export interface TeamChatView {
+  messages: TeamChatMessage[];
+  stopped?: TeamChatStop;
+  /** Messages in a row that may start work before the chat pauses. */
+  unpromptedLimit: number;
+  /** Messages one session's agents may exchange in all. */
+  messageLimit: number;
+}
+
+/** Emitted by the host when a session's agent chat changes; the payload names the session. */
+export const TEAM_CHAT_EVENT = "thingmaker://team-chat";

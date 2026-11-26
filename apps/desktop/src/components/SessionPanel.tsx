@@ -26,6 +26,7 @@ import { ImagesPane } from "./ImagesPane";
 import { OdysseyPane } from "./OdysseyPane";
 import { UltraReviewPane, useUltraReviewLabel } from "./UltraReview";
 import { BigThingBand, BigThingTurnCard, SideNotesCard } from "./BigThingLinks";
+import { TeamChatBand } from "./TeamChat";
 import { BackgroundTasksButton } from "./BackgroundTasks";
 import { bigThingTurnOf, splitSideNotes, userMessageText } from "../bigThingTurns";
 import { DocumentWarnings } from "./DocumentWarnings";
@@ -1167,6 +1168,7 @@ export function SessionPanel({ sessionId }: { sessionId: string }) {
             </div>
           )}
           <BigThingBand sessionId={sessionId} />
+          <TeamChatBand sessionId={sessionId} />
           <div aria-busy={active} className="transcript" ref={transcriptRef}>
             <EarlierConversation sessionId={sessionId} />
             {transcriptGroups.map((group, index, groups) => (

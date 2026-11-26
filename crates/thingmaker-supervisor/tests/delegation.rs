@@ -711,3 +711,75 @@ async fn a_local_member_is_left_out_of_the_chat_unless_the_team_lets_it_in() {
     assert!(service.send_chat(&lead, &job.id, "Again", None).unwrap_err().contains("Agent chat is off"));
     service.release("lead").await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agents_may_only_start_so_much_work_for_each_other_before_the_person_writes() {
+    use thingmaker_supervisor::delegation::jobs::chat::{ChatEvent, ChatStop, MAX_UNPROMPTED_STARTS};
+    let Some((service, _, _)) = service(&[]) else { return };
+    let heard = Arc::new(Mutex::new(Vec::new()));
+    let events = heard.clone();
+    service.on_chat(move |event| match event {
+        ChatEvent::Changed { session } => events.lock().unwrap().push(session),
+        _ => {}
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let token = service.register("lead", Provider::Claude, dir.path().into(), team());
+    let lead = service.caller_for_token(&token).unwrap();
+    let first = service.delegate("lead", DelegateArgs { task: "Read the brief".into(), worker: Some("sonnet".into()), ..Default::default() }).unwrap();
+    let done = service.await_jobs("lead", std::slice::from_ref(&first.id), Duration::from_secs(30), false).await.unwrap();
+    let worker = done[0].worker_session.clone().unwrap();
+
+    // Each message finds the worker with nothing running, and starts a job.
+    for round in 0..MAX_UNPROMPTED_STARTS {
+        service.send_chat(&lead, &first.id, &format!("Question {round}"), None).unwrap();
+        let message = settled(&service, "lead").await;
+        assert!(message.delivered, "{:?}", message.error);
+        until(|| service.jobs("lead").iter().all(|job| job.status.is_finished())).await;
+    }
+    assert_eq!(service.jobs("lead").iter().filter(|job| job.chat).count(), MAX_UNPROMPTED_STARTS);
+    assert_eq!(service.chat_view("lead").stopped, Some(ChatStop::Paused));
+    let refused = service.send_chat(&lead, &first.id, "One more", None).unwrap_err();
+    assert!(refused.contains("Team chat is paused") && refused.contains("resumes when they next write"), "{refused}");
+    assert_eq!(service.chat_history("lead").len(), MAX_UNPROMPTED_STARTS, "the refused message was not kept");
+
+    // Writing in another team's session changes nothing; in this one, or to
+    // one of its workers, it lets the agents go on.
+    service.register("other", Provider::Claude, dir.path().into(), team());
+    service.note_person("other");
+    assert_eq!(service.chat_view("lead").stopped, Some(ChatStop::Paused));
+    service.note_person(&worker);
+    assert_eq!(service.chat_view("lead").stopped, None);
+    service.send_chat(&lead, &first.id, "Thanks for waiting", None).unwrap();
+    assert!(settled(&service, "lead").await.delivered);
+    assert!(heard.lock().unwrap().iter().all(|session| session == "lead") && heard.lock().unwrap().len() > MAX_UNPROMPTED_STARTS, "the interface heard each change");
+    service.release("lead").await;
+    service.release("other").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sessions_chat_holds_only_so_many_messages() {
+    use thingmaker_supervisor::delegation::jobs::chat::{ChatStop, MAX_SESSION_MESSAGES};
+    // A worker whose turn never ends: every message is steered into it, so
+    // none starts anything and only the total is in the way.
+    let Some((service, _, _)) = service_with_flags(&[], &["--hang"]) else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let token = service.register("lead", Provider::Claude, dir.path().into(), team());
+    let lead = service.caller_for_token(&token).unwrap();
+    let worker = service.delegate("lead", DelegateArgs { task: "Read the brief".into(), worker: Some("sonnet".into()), ..Default::default() }).unwrap();
+    until(|| service.job("lead", &worker.id).unwrap().status == JobStatus::Running).await;
+    for round in 0..MAX_SESSION_MESSAGES {
+        service.send_chat(&lead, &worker.id, &format!("Note {round}"), None).unwrap();
+    }
+    let refused = service.send_chat(&lead, &worker.id, "One more", None).unwrap_err();
+    assert!(refused.contains(&format!("{MAX_SESSION_MESSAGES} chat messages")), "{refused}");
+    until(|| service.chat_history("lead").iter().all(|message| message.delivered || message.error.is_some())).await;
+    let view = service.chat_view("lead");
+    assert_eq!(view.messages.len(), MAX_SESSION_MESSAGES);
+    assert!(view.messages.iter().all(|message| message.delivered), "steering starts nothing, so nothing paused it");
+    assert_eq!(view.stopped, Some(ChatStop::Full));
+    // The person writing does not buy more: the total is the session's.
+    service.note_person("lead");
+    assert_eq!(service.chat_view("lead").stopped, Some(ChatStop::Full));
+    assert_eq!(service.jobs("lead").len(), 1);
+    service.release("lead").await;
+}

@@ -1,4 +1,11 @@
 //! Session-scoped mailboxes. Addresses identify a conversation, even when two jobs use the same slot.
+//!
+//! Two agents answering each other need nobody else to keep going, and every
+//! answer is a turn on the person's account. So a session's chat is bounded
+//! twice: by how many deliveries in a row may start work without the person
+//! writing anything ([`MAX_UNPROMPTED_STARTS`]), and by how many messages it
+//! may hold in all ([`MAX_SESSION_MESSAGES`]). A sender past either is told
+//! so, and the session's view says it for the person.
 use super::*;
 use crate::supervisor::SteerOutcome;
 use serde_json::{Value, json};
@@ -8,6 +15,15 @@ const LEAD: &str = "orchestrator";
 
 /// What a member the team's setting leaves out of the chat is told.
 const CHAT_CLOSED: &str = "Agent chat is off for this member of the team. Say it in your report to the orchestrator instead.";
+
+/// Deliveries in a row that may start a turn or a job without the person
+/// writing anything in the session. A message steered into a turn that is
+/// already running starts nothing and is not counted. Once reached, the chat
+/// is paused: nothing more is sent until the person writes.
+pub const MAX_UNPROMPTED_STARTS: usize = 6;
+
+/// Messages the agents of one session may exchange in all.
+pub const MAX_SESSION_MESSAGES: usize = 60;
 
 /// Workers answering a chat message at once. These jobs are apart from the
 /// orchestrator's own ([`MAX_RUNNING_JOBS`]): a busy chat must not leave it
@@ -20,6 +36,63 @@ pub(super) struct Room {
     messages: Vec<Message>,
     draining: HashSet<String>,
     pub(super) closing: HashSet<String>,
+    /// Deliveries that started a turn or a job since the person last wrote.
+    unprompted: usize,
+}
+
+impl Room {
+    fn stopped(&self) -> Option<ChatStop> {
+        if self.messages.len() >= MAX_SESSION_MESSAGES {
+            Some(ChatStop::Full)
+        } else if self.unprompted >= MAX_UNPROMPTED_STARTS {
+            Some(ChatStop::Paused)
+        } else {
+            None
+        }
+    }
+}
+
+/// Why a session's agents can send no more.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatStop {
+    /// Too many deliveries in a row started work by themselves; it resumes
+    /// when the person writes in the session.
+    Paused,
+    /// The session's total is spent.
+    Full,
+}
+
+impl ChatStop {
+    /// What the sender is told.
+    fn refusal(self) -> String {
+        match self {
+            Self::Paused => format!(
+                "Team chat is paused: {MAX_UNPROMPTED_STARTS} messages in a row started work without the person writing anything. It resumes when they next write in this session. Until then, say what you have in your report."
+            ),
+            Self::Full => format!("This session's agents have exchanged {MAX_SESSION_MESSAGES} chat messages, the most one session allows. Say what is left in your report."),
+        }
+    }
+}
+
+/// A session's chat as the interface shows it.
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatView {
+    pub messages: Vec<Message>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stopped: Option<ChatStop>,
+    pub unprompted_limit: usize,
+    pub message_limit: usize,
+}
+
+/// Something the host is told about a chat, as it happens.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum ChatEvent {
+    /// The session's chat changed: a message was sent, delivered or given up,
+    /// or the chat was paused or resumed.
+    Changed { session: String },
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -50,6 +123,71 @@ impl Delegation {
             .get(session)
             .map(|t| t.chat.messages.clone())
             .unwrap_or_default()
+    }
+
+    /// The session's messages, and whether its agents may still send.
+    pub fn chat_view(&self, session: &str) -> ChatView {
+        let state = self.state();
+        let room = state.orchestrators.get(session).map(|team| &team.chat);
+        ChatView {
+            messages: room.map(|room| room.messages.clone()).unwrap_or_default(),
+            stopped: room.and_then(Room::stopped),
+            unprompted_limit: MAX_UNPROMPTED_STARTS,
+            message_limit: MAX_SESSION_MESSAGES,
+        }
+    }
+
+    /// Hears every chat event, for the interface. One listener: the host's.
+    pub fn on_chat(&self, listener: impl Fn(ChatEvent) + Send + Sync + 'static) {
+        *self.inner.chat_listener.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(listener));
+    }
+
+    /// Never called with the state locked: the listener may ask for it.
+    fn chat_event(&self, event: ChatEvent) {
+        let listener = self.inner.chat_listener.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+        if let Some(listener) = listener {
+            listener(event);
+        }
+    }
+
+    /// The person wrote in a session: its own, or one of its workers'. The
+    /// agents of that team may start work for each other again.
+    pub fn note_person(&self, handle: &str) {
+        let session = {
+            let mut state = self.state();
+            let session = if state.orchestrators.contains_key(handle) {
+                Some(handle.to_string())
+            } else {
+                state.jobs.values().find(|record| record.actor.is_some() && record.view.worker_session.as_deref() == Some(handle)).map(|record| record.view.orchestrator.clone())
+            };
+            match session.and_then(|session| state.orchestrators.get_mut(&session).map(|team| (session, team))) {
+                Some((session, team)) if team.chat.unprompted > 0 => {
+                    team.chat.unprompted = 0;
+                    session
+                }
+                _ => return,
+            }
+        };
+        self.chat_event(ChatEvent::Changed { session });
+    }
+
+    /// Counts a delivery that is about to start a turn or a job, and refuses
+    /// it once the agents have started that many in a row by themselves.
+    fn reserve_start(&self, session: &str, generation: &str) -> Result<(), String> {
+        let mut state = self.state();
+        let team = state.orchestrators.get_mut(session).filter(|team| team.token == generation).ok_or("Session ended.")?;
+        if team.chat.unprompted >= MAX_UNPROMPTED_STARTS {
+            return Err(ChatStop::Paused.refusal());
+        }
+        team.chat.unprompted += 1;
+        Ok(())
+    }
+
+    /// Gives back a start that did not happen after all.
+    fn release_start(&self, session: &str) {
+        if let Some(team) = self.state().orchestrators.get_mut(session) {
+            team.chat.unprompted = team.chat.unprompted.saturating_sub(1);
+        }
     }
 
     /// Whether the team lets this caller use the chat at all
@@ -118,6 +256,9 @@ impl Delegation {
                 .filter(|team| team.root == caller.root())
                 .ok_or("Session ended.")?;
             let room = &mut team.chat;
+            if let Some(stop) = room.stopped() {
+                return Err(stop.refusal());
+            }
             if let Some(parent) = reply_to
                 && !room.messages.iter().any(|m| m.id == parent && m.from == to && m.to == from)
             {
@@ -138,6 +279,7 @@ impl Delegation {
             room.messages.push(message.clone());
             (message, room.draining.insert(to), team.token.clone())
         };
+        self.chat_event(ChatEvent::Changed { session: session.to_owned() });
         if start {
             let service = self.clone();
             let session = session.to_owned();
@@ -167,18 +309,23 @@ impl Delegation {
                 message
             };
             let result = self.deliver_chat(session, &message, generation).await;
-            let mut state = self.state();
-            if let Some(item) = state
-                .orchestrators
-                .get_mut(session)
-                .filter(|team| team.token == generation)
-                .and_then(|t| t.chat.messages.get_mut(message.id - 1))
             {
-                match result {
-                    Ok(()) => item.delivered = true,
-                    Err(error) => item.error = Some(error),
+                let mut state = self.state();
+                if let Some(item) = state
+                    .orchestrators
+                    .get_mut(session)
+                    .filter(|team| team.token == generation)
+                    .and_then(|t| t.chat.messages.get_mut(message.id - 1))
+                {
+                    match result {
+                        Ok(()) => item.delivered = true,
+                        // Taken after all, by a turn that was already on its way.
+                        Err(_) if item.delivered => {}
+                        Err(error) => item.error = Some(error),
+                    }
                 }
             }
+            self.chat_event(ChatEvent::Changed { session: session.to_owned() });
         }
     }
 
@@ -239,17 +386,21 @@ impl Delegation {
                         }
                     }
                 } else if job.is_none() {
-                    match actor
-                        .submit_text(format!("chat-{}", message.id), &prompt)
-                        .await
-                        .map_err(|e| e.message)?
-                    {
-                        SubmissionOutcome::Accepted => return Ok(()),
-                        SubmissionOutcome::OutcomeUnknown { error } => return Err(error.message),
-                        SubmissionOutcome::Rejected { error } => {
+                    // An idle orchestrator: this message starts its next turn.
+                    self.reserve_start(session, generation)?;
+                    match actor.submit_text(format!("chat-{}", message.id), &prompt).await {
+                        Ok(SubmissionOutcome::Accepted) => return Ok(()),
+                        // It may have gone in: the start stays counted.
+                        Ok(SubmissionOutcome::OutcomeUnknown { error }) => return Err(error.message),
+                        Ok(SubmissionOutcome::Rejected { error }) => {
+                            self.release_start(session);
                             if !actor.snapshot().await.map_err(|e| e.message)?.foreground.is_active() {
                                 return Err(error.message);
                             }
+                        }
+                        Err(error) => {
+                            self.release_start(session);
+                            return Err(error.message);
                         }
                     }
                 }
@@ -258,6 +409,8 @@ impl Delegation {
                 && !active
                 && job.status.is_finished()
             {
+                // A worker with nothing running: this message is its next job.
+                self.reserve_start(session, generation)?;
                 let args = DelegateArgs {
                     task: prompt.clone(),
                     continue_job: Some(job.id),
@@ -265,25 +418,15 @@ impl Delegation {
                     ..Default::default()
                 };
                 match self.delegate_inner(session, args, Some(message.id)) {
-                    Ok(next) => loop {
-                        {
-                            let state = self.state();
-                            let team = state
-                                .orchestrators
-                                .get(session)
-                                .filter(|team| team.token == generation)
-                                .ok_or("Session ended.")?;
-                            if team.chat.messages[message.id - 1].delivered {
-                                return Ok(());
-                            }
-                            let record = state.jobs.get(&next.id).ok_or("Job ended.")?;
-                            if record.view.status.is_finished() {
-                                return Err(record.view.error.clone().unwrap_or_else(|| "Message was not accepted.".into()));
-                            }
+                    Ok(next) => {
+                        let taken = self.await_chat_job(session, message, generation, &next.id, &mut changed).await;
+                        if taken.is_err() {
+                            self.release_start(session);
                         }
-                        changed.changed().await.map_err(|_| "Session ended.")?;
-                    },
+                        return taken;
+                    }
                     Err(error) => {
+                        self.release_start(session);
                         // A concurrent delegation can reserve the worker or the last free slot.
                         let state = self.state();
                         let jobs = || state.jobs.values().filter(|r| r.view.orchestrator == session);
@@ -303,13 +446,33 @@ impl Delegation {
         }
     }
 
+    /// Waits for the job a message started to take it: delivered once the
+    /// worker has the prompt, failed if the job ends first.
+    async fn await_chat_job(&self, session: &str, message: &Message, generation: &str, job_id: &str, changed: &mut watch::Receiver<u64>) -> Result<(), String> {
+        loop {
+            {
+                let state = self.state();
+                let team = state.orchestrators.get(session).filter(|team| team.token == generation).ok_or("Session ended.")?;
+                if team.chat.messages[message.id - 1].delivered {
+                    return Ok(());
+                }
+                let record = state.jobs.get(job_id).ok_or("Job ended.")?;
+                if record.view.status.is_finished() {
+                    return Err(record.view.error.clone().unwrap_or_else(|| "Message was not accepted.".into()));
+                }
+            }
+            changed.changed().await.map_err(|_| "Session ended.")?;
+        }
+    }
+
     pub(super) fn chat_accepted(&self, job_id: &str) {
         let mut state = self.state();
         let Some(job) = state.jobs.get(job_id) else { return };
         let Some(id) = job.chat_message else { return };
         let session = job.view.orchestrator.clone();
-        if let Some(team) = state.orchestrators.get_mut(&session) {
-            team.chat.messages[id - 1].delivered = true;
+        if let Some(item) = state.orchestrators.get_mut(&session).and_then(|team| team.chat.messages.get_mut(id - 1)) {
+            item.delivered = true;
+            item.error = None;
         }
         self.bump();
     }

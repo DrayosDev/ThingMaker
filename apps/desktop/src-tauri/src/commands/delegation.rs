@@ -16,7 +16,10 @@ use thingmaker_supervisor::{
     agents::Provider,
     delegation::{
         Combo, Delegation, JobView, WorkerLauncher, WorkerSpec,
-        jobs::{BoxFuture, RetryPolicy},
+        jobs::{
+            BoxFuture, RetryPolicy,
+            chat::{ChatEvent, ChatView},
+        },
         orchestrator_guidance,
         socket::{DelegationSocket, RELAY_ARG, server_entry, socket_path},
     },
@@ -28,6 +31,10 @@ use super::{CommandResult, storage_error};
 use crate::state::AppState;
 
 pub const JOB_EVENT: &str = "thingmaker://job";
+/// A session's agent chat changed; the payload is `{ handle }`, and the
+/// renderer asks for the chat again. Not passed on to the phone, which reads
+/// the chat when it shows it.
+pub const TEAM_CHAT_EVENT: &str = "thingmaker://team-chat";
 /// Settings key for a team: scope `global` for the default a new session
 /// starts with, `session:<row id>` for one session's own.
 pub const COMBO_KEY: &str = "combo";
@@ -52,6 +59,13 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
         if let Some(engine) = emitter.try_state::<AppState>().and_then(|state| state.engine.get().cloned()) {
             engine.note_job(job);
         }
+    });
+    let chat = app.clone();
+    delegation.on_chat(move |event| match event {
+        ChatEvent::Changed { session } => {
+            let _ = chat.emit(TEAM_CHAT_EVENT, serde_json::json!({ "handle": session }));
+        }
+        _ => {}
     });
     let path = socket_path(&state.data_dir);
     let socket = tauri::async_runtime::block_on(async { DelegationSocket::bind(delegation.clone(), path) }).map_err(|error| format!("could not open the ThingMaker MCP socket: {error}"))?;
@@ -129,6 +143,14 @@ pub fn watch_orchestrator(state: &AppState, actor: &SessionActor) {
             }
         }
     });
+}
+
+/// The person wrote in this session (a prompt, a queued one, a steer): the
+/// agents of its team may start work for each other again.
+pub fn note_person(state: &AppState, handle: &str) {
+    if let Some(delegation) = state.delegation.get() {
+        delegation.note_person(handle);
+    }
 }
 
 /// Forgets an orchestrator and stops its workers.
@@ -303,9 +325,11 @@ pub fn delegation_default_combo_set(combo: Combo, state: State<'_, AppState>) ->
     Ok(combo)
 }
 
+/// A live session's agent chat: its messages, and whether its agents may
+/// still send.
 #[tauri::command]
-pub fn delegation_chat(handle: SessionHandle, state: State<'_, AppState>) -> CommandResult<Vec<thingmaker_supervisor::delegation::jobs::chat::Message>> {
-    Ok(delegation(&state)?.chat_history(&handle.id))
+pub fn delegation_chat(handle: SessionHandle, state: State<'_, AppState>) -> CommandResult<ChatView> {
+    Ok(delegation(&state)?.chat_view(&handle.id))
 }
 
 /// A live session's jobs, oldest first.

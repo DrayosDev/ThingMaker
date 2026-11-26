@@ -645,6 +645,7 @@ pub async fn session_submit(request: SubmitRequest, state: State<'_, AppState>) 
         return Err(DesktopError::io("invalid request id"));
     }
     let actor = actor_for(&state, &request.handle)?;
+    super::delegation::note_person(&state, &request.handle.id);
     let root = state
         .actor_entries()
         .into_iter()
@@ -799,6 +800,7 @@ pub async fn session_enqueue(request: EnqueueRequest, state: State<'_, AppState>
         return Err(DesktopError::io("the queued prompt's composer state is too large"));
     }
     let actor = actor_for(&state, &request.handle)?;
+    super::delegation::note_person(&state, &request.handle.id);
     let root = state
         .actor_entries()
         .into_iter()
@@ -841,6 +843,7 @@ pub async fn session_steer(request: SteerRequest, state: State<'_, AppState>) ->
         return Err(DesktopError::io("steer text is empty"));
     }
     let actor = actor_for(&state, &request.handle)?;
+    super::delegation::note_person(&state, &request.handle.id);
     actor.steer_text(&request.text).await
 }
 

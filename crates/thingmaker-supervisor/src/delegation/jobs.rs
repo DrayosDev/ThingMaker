@@ -386,6 +386,8 @@ struct Inner {
     /// Local models share this computer's GPU, so one local job runs at a
     /// time; two side by side would each crawl.
     local_gate: Arc<tokio::sync::Semaphore>,
+    /// Who hears what happens in the sessions' chats.
+    chat_listener: std::sync::RwLock<Option<Arc<dyn Fn(chat::ChatEvent) + Send + Sync>>>,
 }
 
 /// What a local job waiting its turn says.
@@ -429,6 +431,7 @@ impl Delegation {
                 reaper: std::sync::atomic::AtomicBool::new(false),
                 idle: Mutex::new(WORKER_IDLE),
                 local_gate: Arc::new(tokio::sync::Semaphore::new(1)),
+                chat_listener: std::sync::RwLock::new(None),
             }),
         }
     }
