@@ -15,7 +15,7 @@ mod plugins;
 mod skill_dependencies;
 mod skill_links;
 pub use bundled::install as install_bundled_skills;
-pub use imported::{ImportStatus, PROVIDERS as IMPORT_PROVIDERS, root as imports_root, setup as setup_import};
+pub use imported::{ImportStatus, PROVIDERS as IMPORT_PROVIDERS};
 pub use skill_links::expand_skills;
 pub use skill_dependencies::McpDependency;
 
@@ -85,6 +85,9 @@ pub struct ResourceCatalog {
     pub notes: Vec<String>,
     /// Which providers' skills are imported copies.
     pub imports: Vec<ImportStatus>,
+    /// Where those copies are kept.
+    #[serde(skip)]
+    imports_root: PathBuf,
     #[serde(skip)]
     local_only: bool,
 }
@@ -309,6 +312,17 @@ pub fn catalog(home: &Path, config_dir: &Path, root: Option<&Path>) -> Result<Re
 }
 
 pub fn catalog_with_homes(home: &Path, config_dir: &Path, codex_home: &Path, root: Option<&Path>) -> Result<ResourceCatalog, DesktopError> {
+    build(home, config_dir, codex_home, root, None)
+}
+
+/// Copies every skill `provider` offers into ThingMaker's imported skills, or
+/// brings those copies up to date, and returns the catalog that results.
+/// Listing a catalog never does this: the person asks for it.
+pub fn import_skills(home: &Path, config_dir: &Path, codex_home: &Path, root: Option<&Path>, provider: &str) -> Result<ResourceCatalog, DesktopError> {
+    build(home, config_dir, codex_home, root, Some(provider))
+}
+
+fn build(home: &Path, config_dir: &Path, codex_home: &Path, root: Option<&Path>, import: Option<&str>) -> Result<ResourceCatalog, DesktopError> {
     let mut entries = Vec::new();
     let mut settings = read(&config_dir.join("settings.json"))?;
     let mut project_dirs = Vec::new();
@@ -402,7 +416,9 @@ pub fn catalog_with_homes(home: &Path, config_dir: &Path, codex_home: &Path, roo
     plugins::add_synced_claude_plugins(&mut entries, &config_dir.join("plugins/synced"), &settings["oauthAccount"]);
     plugins::add_codex_plugins(&mut entries, codex_home);
     for entry in &mut entries { entry.provider = provider_of(&entry.source).map(str::to_string); }
-    let imports = imported::apply(&mut entries, &imported::root(home));
+    let imports_root = imported::root(home);
+    if let Some(provider) = import { imported::sync(&imports_root, provider, &entries)?; }
+    let imports = imported::apply(&mut entries, &imports_root);
     // Later native definitions have precedence. A hidden duplicate cannot be
     // selected by origin when Claude itself resolves both by the same name.
     // The same manifest can explicitly list its default directories/files.
@@ -454,8 +470,8 @@ pub fn catalog_with_homes(home: &Path, config_dir: &Path, codex_home: &Path, roo
     entries.sort_by(|a, b| a.id.cmp(&b.id));
     skill_dependencies::annotate(&mut entries);
     skill_links::annotate(&mut entries);
-    Ok(ResourceCatalog { entries, local_only: false, imports, notes: vec![
-        "Shared skills: .claude, .agents, .codex and .gemini folders, ThingMaker's own skills, installed Claude plugins, plugins synced from claude.ai and enabled Codex plugins. Imported providers list their copies under ~/.thingmaker/imported-skills instead. Legacy commands, enterprise/synced skills and cloud connectors are not listed. Skills may depend on tools or syntax specific to their original harness.".into(),
+    Ok(ResourceCatalog { entries, local_only: false, imports, imports_root, notes: vec![
+        "Shared skills: .claude, .agents, .codex and .gemini folders, ThingMaker's own skills, installed Claude plugins, plugins synced from claude.ai and enabled Codex plugins. Imported providers list their copies under ~/.thingmaker/imported-skills instead, as of their last import. Legacy commands, enterprise/synced skills and cloud connectors are not listed. Skills may depend on tools or syntax specific to their original harness.".into(),
         "Selection controls model-invoked skills and MCP servers. File access, slash commands, plugin hooks and managed policies are separate.".into(),
     ] })
 }
@@ -709,6 +725,8 @@ pub fn resolve(catalog: &ResourceCatalog, selection: &ResourceSelection, environ
                 // A symlinked installation can expose the same physical skill
                 // through several origins; load it once, preferring the first selection.
                 if selected_paths.insert(path.clone()) {
+                    // From here on this copy may be read by a session.
+                    if entry.source.starts_with("imported-skills/") { imported::hold(&catalog.imports_root); }
                     skills.push(entry.runtime_name.clone());
                     let staged_revision = if catalog.local_only {
                         let source = path.parent().ok_or_else(|| DesktopError::io("Missing skill directory"))?;

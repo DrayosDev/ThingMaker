@@ -156,8 +156,9 @@ import { t } from "./i18n";
 // once that package is updated.
 /** A provider whose skills can be copied into `~/.thingmaker/imported-skills/<provider>`. */
 export type ImportedSkillsProvider = "claude" | "codex" | "gemini";
-/** Once `imported`, the catalog lists the copies instead of the provider's own skills. `syncedAt` is unix ms. */
-export type ImportedSkillsStatus = { provider: ImportedSkillsProvider; imported: boolean; skills: number; syncedAt: number | null; problem: string | null };
+/** Once `imported`, the catalog lists the copies instead of the provider's own skills, as the last import left them:
+ * `outdated` of them have a source that changed since. `syncedAt` is unix ms. */
+export type ImportedSkillsStatus = { provider: ImportedSkillsProvider; imported: boolean; skills: number; outdated: number; syncedAt: number | null; problem: string | null };
 /** `skillDependencies` holds the ids of the skills this one references (direct only). */
 export type CatalogEntry = MemberResourceEntry & { skillDependencies?: string[]; provider?: ImportedSkillsProvider | "thingmaker" | null; duplicateOf?: string };
 export type ResourceCatalog = Omit<MemberResourceCatalog, "entries"> & { entries: CatalogEntry[]; imports?: ImportedSkillsStatus[] };
@@ -320,8 +321,8 @@ export const api = {
     call<RemovedSkill>(COMMANDS.skillRemove, { request: { scope, workspaceId, directoryName, keepBackup } }),
   mcpOverview: (workspaceId: string | null) => call<McpOverview>(COMMANDS.mcpOverview, { workspaceId }),
   memberResources: (workspaceId: string | null, provider: Provider, local = false) => call<ResourceCatalog>(COMMANDS.memberResources, { workspaceId, provider, local }),
-  /** Copies every skill the provider has into ThingMaker's imported-skills folder; reload the catalog afterwards. */
-  importedSkillsSetup: (provider: ImportedSkillsProvider) => call<ImportedSkillsStatus>(IMPORTED_SKILLS_SETUP, { provider }),
+  /** Copies every skill the provider has into ThingMaker's imported-skills folder, or brings the copies up to date; reload the catalog afterwards. */
+  importedSkillsSetup: (provider: ImportedSkillsProvider, workspaceId: string | null) => call<ImportedSkillsStatus>(IMPORTED_SKILLS_SETUP, { provider, workspaceId }),
   mcpCatalog: () => call<McpCatalogEntry[]>(COMMANDS.mcpCatalog),
   mcpParse: (text: string, name?: string) => call<McpServerSpec[]>(COMMANDS.mcpParse, { request: { text, name: name ?? null } }),
   mcpInstall: (workspaceId: string | null, spec: McpServerSpec, providers: Provider[], scope: McpScope) =>

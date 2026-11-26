@@ -210,22 +210,23 @@ it("drops dependencies with their explicit skill unless another pick still needs
 
 it("sets up a provider's imported skills and reloads the catalog", async () => {
   vi.mocked(api.memberResources).mockResolvedValue({ ...catalog, imports: [
-    { provider: "claude", imported: false, skills: 0, syncedAt: null, problem: null },
-    { provider: "codex", imported: true, skills: 4, syncedAt: 1_700_000_000_000, problem: "2 skills could not be copied" },
+    { provider: "claude", imported: false, skills: 0, outdated: 0, syncedAt: null, problem: null },
+    { provider: "codex", imported: true, skills: 4, outdated: 2, syncedAt: 1_700_000_000_000, problem: "2 skills could not be copied" },
   ] });
-  vi.mocked(api.importedSkillsSetup).mockReset().mockResolvedValue({ provider: "claude", imported: true, skills: 3, syncedAt: 1_700_000_000_000, problem: null });
+  vi.mocked(api.importedSkillsSetup).mockReset().mockResolvedValue({ provider: "claude", imported: true, skills: 3, outdated: 0, syncedAt: 1_700_000_000_000, problem: null });
   render(<Editor worker={{ ...initial, resources: { skills: [], mcps: [] } }} />);
   const claude = await screen.findByRole("group", { name: "Claude Code" });
   const codex = screen.getByRole("group", { name: "Codex" });
   expect(within(claude).getByText("Not set up")).toBeTruthy();
   expect(within(codex).getByText(/4 skills imported/)).toBeTruthy();
+  expect(within(codex).getByText("2 changed since then"), "listing never copies: it says what an import would bring").toBeTruthy();
   expect(within(codex).getByRole("alert").textContent).toBe("2 skills could not be copied");
   expect(within(screen.getByRole("group", { name: "Gemini" })).getByRole("button", { name: "Set up" })).toBeTruthy();
   expect(api.memberResources).toHaveBeenCalledTimes(1);
   fireEvent.click(within(claude).getByRole("button", { name: "Set up" }));
-  expect(api.importedSkillsSetup).toHaveBeenCalledWith("claude");
+  expect(api.importedSkillsSetup).toHaveBeenCalledWith("claude", null);
   await waitFor(() => expect(api.memberResources).toHaveBeenCalledTimes(2));
-  expect(within(await screen.findByRole("group", { name: "Codex" })).getByRole("button", { name: "Re-import" })).toBeTruthy();
+  expect(within(await screen.findByRole("group", { name: "Codex" })).getByRole("button", { name: "Import again" })).toBeTruthy();
 });
 
 it("reports a failed import on its provider", async () => {

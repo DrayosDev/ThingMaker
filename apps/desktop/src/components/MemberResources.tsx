@@ -11,29 +11,32 @@ import { Segmented } from "./settings/controls";
 const errorText = (failure: unknown) => typeof failure === "object" && failure !== null && "message" in failure ? String(failure.message) : String(failure);
 const IMPORT_PROVIDERS: ImportedSkillsProvider[] = ["claude", "codex", "gemini"];
 
-/** First import of a provider's skills into ThingMaker; later catalog loads re-sync them. */
-function ImportedSkillsSetup({ imports, onDone }: { imports: ImportedSkillsStatus[]; onDone: () => void }) {
+/** Importing a provider's skills into ThingMaker, and importing them again:
+ * the copies change only when the person asks here. The previewed workspace
+ * adds the plugins installed for that project. */
+function ImportedSkillsSetup({ imports, workspaceId, onDone }: { imports: ImportedSkillsStatus[]; workspaceId: string | null; onDone: () => void }) {
   const [busy, setBusy] = useState<ImportedSkillsProvider | null>(null);
   const [failure, setFailure] = useState<{ provider: ImportedSkillsProvider; message: string } | null>(null);
   const setup = (provider: ImportedSkillsProvider) => {
     setBusy(provider);
     setFailure(null);
-    void api.importedSkillsSetup(provider).then(
+    void api.importedSkillsSetup(provider, workspaceId).then(
       (status) => { if (status.problem) setFailure({ provider, message: status.problem }); onDone(); },
       (error: unknown) => setFailure({ provider, message: errorText(error) }),
     ).finally(() => setBusy(null));
   };
   return <section className="imported-skills" aria-label={t("Imported skills")}>
-    <p className="small muted">{t("Import a provider's skills once to select ThingMaker's copies here instead of the provider's own. They re-sync each time this list opens.")}</p>
+    <p className="small muted">{t("Import a provider's skills to select ThingMaker's copies here instead of the provider's own. The copies change only when you import again.")}</p>
     {IMPORT_PROVIDERS.map((provider) => {
       const status = imports.find((entry) => entry.provider === provider);
       const problem = failure?.provider === provider ? failure.message : status?.problem;
       return <div className="row wrap" key={provider} role="group" aria-label={PROVIDER_LABELS[provider]}>
         <strong>{PROVIDER_LABELS[provider]}</strong>
         <span className="small muted">{status?.imported
-          ? t("{count} skills imported · synced {time}", { count: status.skills, time: status.syncedAt ? new Date(status.syncedAt).toLocaleString() : t("never") })
+          ? t("{count} skills imported · last import {time}", { count: status.skills, time: status.syncedAt ? new Date(status.syncedAt).toLocaleString() : t("never") })
           : t("Not set up")}</span>
-        <button className="button button-small" disabled={busy !== null} type="button" onClick={() => setup(provider)}>{busy === provider ? t("Importing…") : status?.imported ? t("Re-import") : t("Set up")}</button>
+        {status?.imported && status.outdated > 0 && <span className="small">{t("{count} changed since then", { count: status.outdated })}</span>}
+        <button className="button button-small" disabled={busy !== null} type="button" onClick={() => setup(provider)}>{busy === provider ? t("Importing…") : status?.imported ? t("Import again") : t("Set up")}</button>
         {problem && <span className="small" role="alert">{problem}</span>}
       </div>;
     })}
@@ -124,7 +127,7 @@ export function MemberResources({ worker, onChange, initialWorkspace = "" }: { i
         </div>
         {error && <p role="alert">{error}</p>}
         {catalog?.problem && <p role="alert">{catalog.problem}</p>}
-        {catalog && tab === "skills" && catalog.imports && <ImportedSkillsSetup imports={catalog.imports} onDone={() => setRefresh((value) => value + 1)} />}
+        {catalog && tab === "skills" && catalog.imports && <ImportedSkillsSetup imports={catalog.imports} workspaceId={workspaceId || null} onDone={() => setRefresh((value) => value + 1)} />}
         {catalog && <SkillConnections catalog={catalog} selection={effective} onChange={(next) => patch({ ...selection, mcps: next.mcps })} />}
         {!catalog && !error && <p className="small muted">{t("Loading resources…")}</p>}
         {missing.length > 0 && <div role="alert"><p>{t("Some selected resources are missing from this preview. They must be available in the task's project before this member can start.")}</p>{missing.map((id) => <label className="member-resource" key={id}><input type="checkbox" checked onChange={() => patch({ skills: selection.skills.filter((entry) => entry !== id), mcps: selection.mcps.filter((entry) => entry !== id) })} />{id}</label>)}</div>}
