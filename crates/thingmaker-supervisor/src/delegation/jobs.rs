@@ -191,7 +191,9 @@ pub trait TeamExtension: Send + Sync {
 pub trait WorkerLauncher: Send + Sync {
     /// Identity of account/configuration and resolved resources. A changed
     /// revision must never reuse a conversation with the old tool context.
-    fn revision(&self, _root: &std::path::Path, slot: &WorkerSlot) -> Result<Option<String>, DesktopError> {
+    /// `orchestrator` is the leader's attachment handle: the account a
+    /// worker runs on can follow its leader's.
+    fn revision(&self, _orchestrator: &str, _root: &std::path::Path, slot: &WorkerSlot) -> Result<Option<String>, DesktopError> {
         Ok(slot.resources.as_ref().map(|value| serde_json::to_string(value).unwrap_or_default()))
     }
     /// Opens a worker for `spec`. The actor is registered with the host like
@@ -201,7 +203,7 @@ pub trait WorkerLauncher: Send + Sync {
     /// resolves the member's resources to launch it overrides this, so they
     /// are resolved once rather than once for the revision and again to launch.
     fn launch_with_revision(&self, spec: WorkerSpec) -> BoxFuture<Result<(SessionActor, Option<String>), DesktopError>> {
-        let revision = self.revision(&spec.root, &spec.slot);
+        let revision = self.revision(&spec.orchestrator, &spec.root, &spec.slot);
         let launch = self.launch(spec);
         Box::pin(async move {
             let revision = revision?;
@@ -602,7 +604,7 @@ impl Delegation {
         let Some((root, team)) = team else { return Revisions::default() };
         // A follow-up stays with its own worker; a new job may go to anyone.
         let members = team.workers.into_iter().filter(|slot| follow_up.as_ref().is_none_or(|name| *name == slot.name)).map(|slot| {
-            let revision = self.inner.launcher.revision(&root, &slot).map_err(|error| error.message);
+            let revision = self.inner.launcher.revision(session, &root, &slot).map_err(|error| error.message);
             (slot, revision)
         });
         Revisions { members: members.collect(), root }

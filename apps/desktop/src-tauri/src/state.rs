@@ -81,6 +81,10 @@ pub struct AppState {
     pub ultra_review: std::sync::OnceLock<thingmaker_supervisor::ultrareview::UltraReviewService>,
     /// The model each live attachment was opened on, when one was asked for.
     pub actor_models: Mutex<HashMap<String, String>>,
+    /// The account each live attachment was pinned to, with its provider,
+    /// when the person chose one for the session rather than the provider's
+    /// active account.
+    pub pinned_accounts: Mutex<HashMap<String, (Provider, String)>>,
     /// Shared by sessions in the same tree; hooks own the cache's lifetime.
     pub review_caches: Mutex<HashMap<PathBuf, std::sync::Weak<Mutex<thingmaker_supervisor::review::BaselineCache>>>>,
     /// The update the last check found, kept so installing is the one the person saw.
@@ -114,6 +118,7 @@ impl AppState {
             engine: std::sync::OnceLock::new(),
             ultra_review: std::sync::OnceLock::new(),
             actor_models: Mutex::new(HashMap::new()),
+            pinned_accounts: Mutex::new(HashMap::new()),
         })
     }
 
@@ -178,9 +183,21 @@ impl AppState {
         self.actor_models.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(id).cloned()
     }
 
+    /// Remembers the account an attachment was pinned to.
+    pub fn set_pinned_account(&self, id: &str, provider: Provider, account: &str) {
+        self.pinned_accounts.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(id.to_string(), (provider, account.to_string()));
+    }
+
+    /// The account a live attachment is pinned to, and the provider it is
+    /// an account of; `None` for one that follows the active account.
+    pub fn pinned_account(&self, id: &str) -> Option<(Provider, String)> {
+        self.pinned_accounts.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(id).cloned()
+    }
+
     pub fn remove_actor(&self, id: &str) -> Option<SessionActor> {
         self.web_sessions.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
         self.actor_models.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(id);
+        self.pinned_accounts.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(id);
         self.actor_roots
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())

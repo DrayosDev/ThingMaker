@@ -239,12 +239,18 @@ pub async fn release(state: &AppState, key: &str) {
     }
 }
 
+/// The account a worker of `orchestrator` runs on: the leader's own when the
+/// person pinned the leader to one and the worker is on the same provider,
+/// since that is the account they chose to spend; the provider's active
+/// account otherwise.
+fn worker_account(state: &AppState, orchestrator: &str, provider: Provider) -> String {
+    state.pinned_account(orchestrator).filter(|(pinned, _)| *pinned == provider).map(|(_, account)| account).unwrap_or_else(|| state.active_account(provider))
+}
+
 /// What a worker opened with: its account, its workspace and its resolved
 /// resources. A worker whose revision changed is not reused.
-fn revision_of(state: &AppState, root: &std::path::Path, slot: &thingmaker_supervisor::delegation::WorkerSlot, resolved: Option<&thingmaker_supervisor::integrations::member_resources::ResolvedResources>) -> String {
-    serde_json::to_string(&serde_json::json!([
-        state.active_account(slot.provider), root, resolved.map(|value| &value.revision)
-    ])).unwrap_or_default()
+fn revision_of(account: &str, root: &std::path::Path, resolved: Option<&thingmaker_supervisor::integrations::member_resources::ResolvedResources>) -> String {
+    serde_json::to_string(&serde_json::json!([account, root, resolved.map(|value| &value.revision)])).unwrap_or_default()
 }
 
 struct HostLauncher {
@@ -252,10 +258,10 @@ struct HostLauncher {
 }
 
 impl WorkerLauncher for HostLauncher {
-    fn revision(&self, root: &std::path::Path, slot: &thingmaker_supervisor::delegation::WorkerSlot) -> CommandResult<Option<String>> {
+    fn revision(&self, orchestrator: &str, root: &std::path::Path, slot: &thingmaker_supervisor::delegation::WorkerSlot) -> CommandResult<Option<String>> {
         let state = self.app.state::<AppState>();
         let resolved = super::member_resources::resolve(&state, root, slot)?;
-        Ok(Some(revision_of(&state, root, slot, resolved.as_ref())))
+        Ok(Some(revision_of(&worker_account(&state, orchestrator, slot.provider), root, resolved.as_ref())))
     }
     fn launch(&self, spec: WorkerSpec) -> BoxFuture<Result<SessionActor, DesktopError>> {
         let launched = self.launch_with_revision(spec);
@@ -272,10 +278,11 @@ impl WorkerLauncher for HostLauncher {
                 .ok_or_else(|| DesktopError::not_ready("the orchestrator's workspace is gone"))?;
             let record = super::workspace::ensure_trusted(&state, record)?;
             let reserved = SessionId::reserve();
-            let (target, mut launch) = super::session::build_launch(&state, &record, spec.slot.provider, spec.slot.model.clone(), spec.slot.effort.clone(), spec.resume.clone(), reserved.clone())?;
+            let account = worker_account(&state, &spec.orchestrator, spec.slot.provider);
+            let (target, mut launch) = super::session::build_launch_for_account(&state, &record, spec.slot.provider, spec.slot.model.clone(), spec.slot.effort.clone(), spec.resume.clone(), reserved.clone(), &account)?;
             // Resolved once: the revision recorded is the one this launch used.
             let resolved = super::member_resources::resolve(&state, &spec.root, &spec.slot)?;
-            let revision = revision_of(&state, &spec.root, &spec.slot, resolved.as_ref());
+            let revision = revision_of(&account, &spec.root, resolved.as_ref());
             if spec.resume.is_some() && spec.resume_revision.as_ref() != Some(&revision) {
                 return Err(DesktopError::not_ready("The worker account or resources changed before its conversation could reopen."));
             }
@@ -286,6 +293,7 @@ impl WorkerLauncher for HostLauncher {
             };
             let program = super::session::program_of(&target, &launch);
             let mut config = SessionActorConfig::new(target, launch);
+            config.account_id = Some(account.clone());
             config.builtin_web = builtin_web;
             config.resource_files = resource_files;
             config.environment = super::session::launch_environment(&state).with_program_dir(&program);
@@ -313,6 +321,11 @@ impl WorkerLauncher for HostLauncher {
                 .map_err(storage_error)?;
             if spec.resume.is_some() {
                 state.with_storage(|s| s.session_set_archive(&row.id, thingmaker_supervisor::storage::workspaces::ArchiveState::Active)).map_err(storage_error)?;
+            }
+            // Opened on its leader's pinned account: the worker's own
+            // conversation is reopened on it too.
+            if state.pinned_account(&spec.orchestrator).is_some_and(|(provider, _)| provider == spec.slot.provider) {
+                state.with_storage(|s| s.setting_set(thingmaker_supervisor::storage::workspaces::SESSION_ACCOUNT, &row.id, &account)).map_err(storage_error)?;
             }
             if spec.slot.provider == Provider::Local && let Some(model) = &spec.slot.model {
                 let setup = super::session::LocalSessionSetup { model: model.clone(), resources: spec.slot.resources.clone() };
@@ -526,5 +539,77 @@ mod chat_receipt_tests {
         assert_eq!(kept.len(), CHAT_RECEIPTS_KEPT);
         assert_eq!(kept[0].token, "t1");
         assert_eq!(kept.last().unwrap().token, "newest");
+    }
+}
+
+#[cfg(test)]
+mod leader_tests {
+    use super::*;
+    use thingmaker_supervisor::{
+        acp::LaunchTarget,
+        agents::{accounts, gemini::GeminiLaunchOptions},
+        delegation::WorkerSlot,
+    };
+
+    fn helper() -> Combo {
+        Combo { workers: vec![WorkerSlot { name: "helper".into(), provider: Provider::Codex, model: None, effort: None, capabilities: Vec::new(), note: None, prompt: None, resources: None }], ..Default::default() }
+    }
+
+    #[test]
+    fn gemini_runs_natively_only_when_it_starts_with_a_team_and_a_conversation_keeps_its_transport() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::initialize(dir.path(), None).unwrap();
+        let workspace = state.with_storage(|s| s.workspace_upsert("/project", "/project", "project")).unwrap();
+        let row = |id: &str| state.with_storage(|s| s.session_upsert(&workspace.id, id, SessionOrigin::Desktop, Provider::Gemini)).unwrap().id;
+        // A new session: only with a team to lead.
+        assert!(gemini_native(&state, None, &helper()));
+        assert!(!gemini_native(&state, None, &Combo::default()));
+        // A conversation from before, or one started without a team, stays on
+        // the stream-json bridge even once it has been given a team.
+        let old = row("stream-json");
+        assert!(!gemini_native(&state, Some(&old), &helper()));
+        // One that began natively is reopened natively, with or without one.
+        let native = row("native");
+        state.with_storage(|s| s.setting_set(GEMINI_NATIVE_KEY, &native, &true)).unwrap();
+        assert!(gemini_native(&state, Some(&native), &Combo::default()));
+    }
+
+    #[test]
+    fn a_plain_gemini_session_is_left_exactly_as_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::initialize(dir.path(), None).unwrap();
+        let options = GeminiLaunchOptions::new(dir.path(), "agy");
+        let before = options.arguments();
+        let mut launch = AgentLaunch::Gemini(options);
+        let mut config = SessionActorConfig::new(LaunchTarget::executable("agy"), launch.clone());
+        assert!(!prepare_orchestrator(&state, "plain", dir.path().into(), &helper(), &mut launch, &mut config, false));
+        let AgentLaunch::Gemini(options) = &launch else { panic!("wrong provider") };
+        assert!(!options.native_acp && options.initial_prompt_prefix.is_none());
+        assert_eq!(options.arguments(), before, "still the stream-json command line");
+        assert!(config.mcp_servers.is_empty() && !config.leads_team);
+        // The transport is the conversation's even when the team service is
+        // down: a native one is not reopened on the bridge.
+        assert!(!prepare_orchestrator(&state, "native", dir.path().into(), &helper(), &mut launch, &mut config, true));
+        let AgentLaunch::Gemini(options) = &launch else { panic!("wrong provider") };
+        assert!(options.native_acp);
+        assert_eq!(options.arguments()[0], "acp");
+    }
+
+    #[test]
+    fn a_worker_runs_on_its_leaders_pinned_account_only_on_the_leaders_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::initialize(dir.path(), None).unwrap();
+        let list = [("work", Provider::Claude), ("side", Provider::Codex)].map(|(id, provider)| accounts::Account { id: id.into(), provider, label: id.into() });
+        state.with_storage(|s| s.setting_set(accounts::ACCOUNTS_SETTING, GLOBAL_SCOPE, &list)).unwrap();
+        state.with_storage(|s| s.setting_set(accounts::ACTIVE_ACCOUNT_SETTING, "codex", &"side")).unwrap();
+        // A leader that follows the active account: so do its workers.
+        assert_eq!(worker_account(&state, "lead", Provider::Claude), "default");
+        // Pinned to another Claude account, after the first one ran out.
+        state.set_pinned_account("lead", Provider::Claude, "work");
+        assert_eq!(worker_account(&state, "lead", Provider::Claude), "work");
+        assert_eq!(worker_account(&state, "lead", Provider::Codex), "side", "another provider's worker keeps that provider's active account");
+        assert_eq!(worker_account(&state, "someone-else", Provider::Claude), "default");
+        // The revision a worker is reused by names the account it ran on.
+        assert_ne!(revision_of("work", dir.path(), None), revision_of("default", dir.path(), None));
     }
 }

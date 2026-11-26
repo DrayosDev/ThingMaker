@@ -26,7 +26,7 @@ use thingmaker_supervisor::{
     security::EnvironmentProfile,
     storage::{
         Storage, content_hash,
-        workspaces::{ArchiveState, SessionOrigin, SessionRecord, TrustState, WorkspaceRecord},
+        workspaces::{ArchiveState, SESSION_ACCOUNT, SessionOrigin, SessionRecord, TrustState, WorkspaceRecord},
     },
     supervisor::{
         AgentLaunch, EnqueueOutcome, EventEnvelope, QueueOp, QueueReply, QueuedPrompt, SessionActor, SessionActorConfig,
@@ -65,7 +65,10 @@ pub struct OpenRequest {
     /// its transcript was written by that provider.
     #[serde(default)]
     pub provider: Option<Provider>,
-    /// Account fixed for this attachment, independently of the global picker.
+    /// The account to pin this session to, independently of the provider's
+    /// active one. It is kept with the session: a later resume without one
+    /// runs on it again. Desktop only; the phone's requests have it removed
+    /// (`remote::dispatch`).
     #[serde(default)]
     pub account_id: Option<String>,
     #[serde(default)]
@@ -169,9 +172,8 @@ fn bring_transcript(state: &AppState, provider: Provider, record: &WorkspaceReco
     copied
 }
 
-/// A provider's launch for a session in `record`, used for the user's
-/// sessions and for workers alike: the program found, the workspace's trust
-/// as the permission stance, and the model and effort as given.
+/// [`build_launch_for_account`] on the provider's active account.
+#[cfg(test)]
 pub(crate) fn build_launch(
     state: &AppState,
     record: &WorkspaceRecord,
@@ -185,8 +187,13 @@ pub(crate) fn build_launch(
     build_launch_for_account(state, record, provider, model, effort, resume, reserved, &account_id)
 }
 
+/// A provider's launch for a session in `record` on the account named, used
+/// for the user's sessions and for workers alike: the program found, the
+/// workspace's trust as the permission stance, and the model and effort as
+/// given. The account is the provider's active one, or the one a session
+/// (or a worker's leader) is pinned to.
 #[allow(clippy::too_many_arguments)]
-fn build_launch_for_account(
+pub(crate) fn build_launch_for_account(
     state: &AppState,
     record: &WorkspaceRecord,
     provider: Provider,
@@ -379,6 +386,37 @@ fn source_record(storage: &Storage, workspace: &str, mode: &OpenRequestMode, sou
     }
 }
 
+/// The account a session about to open is pinned to, if any.
+///
+/// One asked for is checked and refused when it is not an account of this
+/// provider: nothing falls back to another identity. One kept from before
+/// (`recorded` is the session being reopened, or the one being copied) is
+/// used while the account still exists; once it has been removed the session
+/// follows the active account again, since its history is shared.
+fn pinned_account(state: &AppState, provider: Provider, requested: Option<&str>, recorded: Option<&SessionRecord>) -> CommandResult<Option<String>> {
+    if let Some(requested) = requested {
+        return state.session_account_id(provider, Some(requested)).map(Some);
+    }
+    let Some(row) = recorded else { return Ok(None) };
+    let kept = state.with_storage(|s| s.setting_get::<String>(SESSION_ACCOUNT, &row.id)).map_err(storage_error)?;
+    Ok(kept.and_then(|account| state.session_account_id(provider, Some(&account)).ok()))
+}
+
+/// Keeps what [`pinned_account`] decided with the session's row, and with
+/// its live attachment for its workers to follow. The pin is the session's,
+/// not the attachment's: it has to be there when the session is reopened,
+/// after a restart too. A session that is not pinned (any more) has none.
+fn keep_pin(state: &AppState, row_id: &str, handle: &str, provider: Provider, pinned: Option<&str>) -> CommandResult<()> {
+    match pinned {
+        Some(account) => {
+            state.with_storage(|s| s.setting_set(SESSION_ACCOUNT, row_id, &account)).map_err(storage_error)?;
+            state.set_pinned_account(handle, provider, account);
+        }
+        None => state.with_storage(|s| s.setting_delete(SESSION_ACCOUNT, row_id)).map_err(storage_error)?,
+    }
+    Ok(())
+}
+
 fn restore_setup(storage: &Storage, recorded: Option<&SessionRecord>, model: Option<String>, requested: Option<ResourceSelection>) -> CommandResult<(Option<String>, Option<ResourceSelection>)> {
     let Some(row) = recorded else { return Ok((model, requested)); };
     if row.provider == Provider::Local && let Some(saved) = storage.setting_get::<LocalSessionSetup>("localSessionSetup", &row.id).map_err(storage_error)? {
@@ -411,7 +449,13 @@ pub async fn session_open(request: OpenRequest, state: State<'_, AppState>) -> C
     }
     let recorded = state.with_storage(|s| source_record(s, &record.id, &request.mode, request.fork_source.as_ref()))?;
     let provider = recorded.as_ref().map(|row| row.provider).or(request.provider).unwrap_or_default();
-    let account_id = state.session_account_id(provider, request.account_id.as_deref())?;
+    // The account asked for, else the one this session (or the one it is
+    // copied from) was pinned to, else the provider's active account.
+    let pinned = pinned_account(&state, provider, request.account_id.as_deref(), recorded.as_ref())?;
+    let account_id = match &pinned {
+        Some(account) => account.clone(),
+        None => state.session_account_id(provider, None)?,
+    };
     // A session that never got a prompt has no transcript, so its provider
     // has nothing to resume and would answer "resource not found". Its row
     // is a tombstone: hidden, and said so plainly.
@@ -539,6 +583,10 @@ pub async fn session_open(request: OpenRequest, state: State<'_, AppState>) -> C
     if let Some(setup) = &local_setup {
         state.with_storage(|s| s.setting_set("localSessionSetup", &desktop_session.id, setup)).map_err(storage_error)?;
     }
+    if gemini_native {
+        state.with_storage(|s| s.setting_set(super::delegation::GEMINI_NATIVE_KEY, &desktop_session.id, &true)).map_err(storage_error)?;
+    }
+    keep_pin(&state, &desktop_session.id, &handle.id, provider, pinned.as_deref())?;
     // A fork is listed under the session it was copied from.
     if request.side_of.is_none()
         && matches!(request.mode, OpenRequestMode::Fork { .. })
@@ -583,9 +631,6 @@ pub async fn session_open(request: OpenRequest, state: State<'_, AppState>) -> C
                     };
                     let session = storage_handle.with_storage(|s| s.session_by_agent_id(&workspace_id, &agent_session_id)).ok().flatten();
                     let result = storage_handle.with_storage(|s| {
-    if gemini_native {
-        state.with_storage(|s| s.setting_set(super::delegation::GEMINI_NATIVE_KEY, &desktop_session.id, &true)).map_err(storage_error)?;
-    }
                         s.baseline_insert(&workspace_id, session.as_ref().map(|s| s.id.as_str()), "session_baseline", base_ref.as_deref(), &manifest)
                     });
                     if let Err(error) = result {
@@ -1312,6 +1357,60 @@ mod recovery_tests {
         let (_, launch) = build_launch(&state, &record, Provider::Gemini, None, None, None, SessionId::reserve()).unwrap();
         let AgentLaunch::Gemini(options) = launch else { panic!("wrong provider") };
         assert!(options.account_home.is_none());
+    }
+
+    #[test]
+    fn a_pinned_account_is_kept_with_the_session_and_used_again_after_a_restart() {
+        use thingmaker_supervisor::{agents::accounts, storage::settings::GLOBAL_SCOPE};
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("data");
+        let open = || {
+            let mut state = AppState::initialize(&data, None).unwrap();
+            state.home = Some(temp.path().join("home"));
+            state
+        };
+        let state = open();
+        let list = ["work", "spare"].map(|id| accounts::Account { id: id.into(), provider: Provider::Codex, label: id.into() });
+        state.with_storage(|s| s.setting_set(accounts::ACCOUNTS_SETTING, GLOBAL_SCOPE, &list)).unwrap();
+        let location = crate::state::ProviderLocation { program: temp.path().join("unused-codex"), script: None };
+        state.with_storage(|s| s.setting_set(crate::state::PROVIDER_LOCATION_KEY, "provider:codex", &location)).unwrap();
+        let record = state.with_storage(|s| s.workspace_upsert("/project", "/project", "project")).unwrap();
+        let row = state.with_storage(|s| s.session_upsert(&record.id, "thread", SessionOrigin::Desktop, Provider::Codex)).unwrap();
+        let other = state.with_storage(|s| s.session_upsert(&record.id, "unpinned", SessionOrigin::Desktop, Provider::Codex)).unwrap();
+
+        // Opened on an account the person chose, while "default" stays active.
+        let pinned = pinned_account(&state, Provider::Codex, Some("work"), None).unwrap();
+        assert_eq!(pinned.as_deref(), Some("work"));
+        keep_pin(&state, &row.id, "handle", Provider::Codex, pinned.as_deref()).unwrap();
+        assert_eq!(state.pinned_account("handle"), Some((Provider::Codex, "work".into())));
+        assert_eq!(state.active_account(Provider::Codex), "default");
+        state.remove_actor("handle");
+        assert!(state.pinned_account("handle").is_none());
+        drop(state);
+
+        // The application restarts; the session is reopened with no account named.
+        let state = open();
+        let pinned = pinned_account(&state, Provider::Codex, None, Some(&row)).unwrap();
+        assert_eq!(pinned.as_deref(), Some("work"));
+        let (_, launch) = build_launch_for_account(&state, &record, Provider::Codex, None, None, Some("thread".into()), SessionId::reserve(), pinned.as_deref().unwrap()).unwrap();
+        let AgentLaunch::Codex(options) = launch else { panic!("wrong provider") };
+        assert_eq!(options.codex_home, Some(accounts::account_folder(&state.data_dir, Provider::Codex, "work")));
+        // A session nobody pinned follows the active account, as before.
+        assert!(pinned_account(&state, Provider::Codex, None, Some(&other)).unwrap().is_none());
+        // Moving it to another account by hand pins it there instead.
+        let moved = pinned_account(&state, Provider::Codex, Some("spare"), Some(&row)).unwrap();
+        keep_pin(&state, &row.id, "handle", Provider::Codex, moved.as_deref()).unwrap();
+        assert_eq!(pinned_account(&state, Provider::Codex, None, Some(&row)).unwrap().as_deref(), Some("spare"));
+        // An account named but not this provider's is refused, not replaced.
+        assert!(pinned_account(&state, Provider::Codex, Some("missing"), Some(&row)).is_err());
+
+        // Once the pinned account is removed the session follows the active
+        // one again, and the stale pin is forgotten on that opening.
+        state.with_storage(|s| s.setting_set(accounts::ACCOUNTS_SETTING, GLOBAL_SCOPE, &list[..1].to_vec())).unwrap();
+        let pinned = pinned_account(&state, Provider::Codex, None, Some(&row)).unwrap();
+        assert!(pinned.is_none());
+        keep_pin(&state, &row.id, "handle", Provider::Codex, pinned.as_deref()).unwrap();
+        assert!(state.with_storage(|s| s.setting_get::<String>(SESSION_ACCOUNT, &row.id)).unwrap().is_none());
     }
 
     #[test]

@@ -54,7 +54,7 @@ struct MockLauncher {
 }
 
 impl WorkerLauncher for MockLauncher {
-    fn revision(&self, root: &std::path::Path, slot: &WorkerSlot) -> Result<Option<String>, DesktopError> {
+    fn revision(&self, _orchestrator: &str, root: &std::path::Path, slot: &WorkerSlot) -> Result<Option<String>, DesktopError> {
         if let Some(delegation) = self.probe.get().cloned() {
             let (done, finished) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
