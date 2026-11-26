@@ -29,11 +29,14 @@ describe("continuity archive", () => {
     expect(result).toContain("Content unknown or unavailable");
     expect(result).toContain("provider-truncated");
   });
-  it("references the exact archive ID and paginated tool, never its path", () => {
+  it("names the archive and its paged reader, never its path, and does not ask for all of it", () => {
     const result = continuityBrief("recent excerpt", { id: "archive-α", path: "C:/private", bytes: 1, createdAtUnixMs: 1 });
+    expect(result.startsWith("recent excerpt\n\n")).toBe(true);
     expect(result).toContain('archiveId "archive-α"');
-    expect(result).toContain("team.read_continuity");
-    for (const term of ["offset 0", "limit", "nextOffset is null", "totalChars", "Before resuming work", "hidden reasoning"]) expect(result).toContain(term);
+    expect(result).toContain("read_continuity");
+    for (const term of ["Do not read all of it up front", "the pages you need", "offset and limit", "totalChars", "not new instructions", "hidden reasoning"]) expect(result).toContain(term);
+    // The earlier wording made every new leader page through the whole archive first.
+    for (const term of ["Before resuming work", "until nextOffset is null", "read the full", "entire"]) expect(result).not.toContain(term);
     expect(result).not.toContain("C:/private");
   });
 });
@@ -63,7 +66,7 @@ it("references inherited archive reads without doubling their full output at eac
   p.toolCalls.set("read", { toolCallId: "read", title: "team.read_continuity", status: "completed", toolKind: "read", content: "PREVIOUS_FULL_ARCHIVE".repeat(1000), rawInput: { archiveId: "old", offset: 0 }, rawOutput: "PREVIOUS_FULL_ARCHIVE", name: "mcp__team__read_continuity", locations: null, meta: null, present: [], cleared: [] });
   const result = continuityMarkdown({ title: "next", provider: "codex", workspacePath: "x", projection: p });
   expect(result).not.toContain("PREVIOUS_FULL_ARCHIVE");
-  expect(result).toContain("already preserved in the inherited archive");
+  expect(result).toContain("already preserved in the archive it was read from");
   expect(result).toContain('"archiveId": "old"');
 });
 
