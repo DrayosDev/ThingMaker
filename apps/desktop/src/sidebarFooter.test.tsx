@@ -17,7 +17,7 @@ const codexUpdate = (latest: string) => ({ codex: { provider: "codex", installed
 beforeEach(() => {
   localStorage.clear();
   useStore.setState({
-    workspaces: [], records: {}, sessions: {}, sessionOrder: [], showHidden: false,
+    workspaces: [], records: {}, sessions: {}, sessionOrder: [], expandedArchives: {},
     view: { kind: "home" },
     usage: { codex: { primary: { usedPercent: 4, windowSeconds: 18_000 }, secondary: { usedPercent: 8, windowSeconds: 604_800 } } },
     providerVersions: codexUpdate("1.1.0"),

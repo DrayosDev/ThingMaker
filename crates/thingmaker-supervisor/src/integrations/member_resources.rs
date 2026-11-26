@@ -9,6 +9,7 @@ use crate::{DesktopError, storage::content_hash};
 
 #[cfg(windows)]
 mod windows_stdio;
+mod plugins;
 mod skill_dependencies;
 pub use skill_dependencies::McpDependency;
 
@@ -242,6 +243,28 @@ fn add_codex_mcps(out: &mut Vec<ResourceEntry>, file: &Path, group: &str, prefix
 
 /// Account config directory, plus the project the member will work in. Project
 /// identifiers deliberately omit absolute paths so exported templates can move.
+/// One plugin's skills and MCP servers: its default `skills/` folder and
+/// `.mcp.json`, plus whatever its manifest lists.
+fn add_plugin(out: &mut Vec<ResourceEntry>, path: &Path, manifest: &Value, id: &str, group: &str, name: &str, enabled: bool) -> Result<(), DesktopError> {
+    if path.join("SKILL.md").is_file() { add_skills(out, path, group, id, Some(name), enabled); }
+    add_skills(out, &path.join("skills"), group, id, Some(name), enabled);
+    if let Some(paths) = manifest.get("skills") {
+        for custom in paths.as_array().cloned().unwrap_or_else(|| vec![paths.clone()]) {
+            if let Some(custom) = custom.as_str() { add_skills(out, &path.join(custom), group, id, Some(name), enabled); }
+        }
+    }
+    add_mcps(out, &read(&path.join(".mcp.json"))?, group, id, Some(name), enabled, Some(path));
+    if let Some(custom) = manifest.get("mcpServers") {
+        if custom.is_object() { add_mcps(out, custom, group, id, Some(name), enabled, Some(path)); }
+        else {
+            for custom in custom.as_array().cloned().unwrap_or_else(|| vec![custom.clone()]) {
+                if let Some(custom) = custom.as_str() { add_mcps(out, &read(&path.join(custom))?, group, id, Some(name), enabled, Some(path)); }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn catalog(home: &Path, config_dir: &Path, root: Option<&Path>) -> Result<ResourceCatalog, DesktopError> {
     catalog_with_homes(home, config_dir, &home.join(".codex"), root)
 }
@@ -331,26 +354,12 @@ pub fn catalog_with_homes(home: &Path, config_dir: &Path, codex_home: &Path, roo
             let Some(path) = chosen.and_then(|install| install["installPath"].as_str()).map(PathBuf::from) else { continue };
             let manifest = read(&path.join(".claude-plugin/plugin.json"))?;
             let name = manifest["name"].as_str().unwrap_or_else(|| id.split('@').next().unwrap_or(id));
-            let group = format!("plugin:{id}");
             let enabled = enabled_plugins.get(id).copied().unwrap_or(false);
-            if path.join("SKILL.md").is_file() { add_skills(&mut entries, &path, &group, id, Some(name), enabled); }
-            add_skills(&mut entries, &path.join("skills"), &group, id, Some(name), enabled);
-            if let Some(paths) = manifest.get("skills") {
-                for custom in paths.as_array().cloned().unwrap_or_else(|| vec![paths.clone()]) {
-                    if let Some(custom) = custom.as_str() { add_skills(&mut entries, &path.join(custom), &group, id, Some(name), enabled); }
-                }
-            }
-            add_mcps(&mut entries, &read(&path.join(".mcp.json"))?, &group, id, Some(name), enabled, Some(&path));
-            if let Some(custom) = manifest.get("mcpServers") {
-                if custom.is_object() { add_mcps(&mut entries, custom, &group, id, Some(name), enabled, Some(&path)); }
-                else {
-                    for custom in custom.as_array().cloned().unwrap_or_else(|| vec![custom.clone()]) {
-                        if let Some(custom) = custom.as_str() { add_mcps(&mut entries, &read(&path.join(custom))?, &group, id, Some(name), enabled, Some(&path)); }
-                    }
-                }
-            }
+            add_plugin(&mut entries, &path, &manifest, id, &format!("plugin:{id}"), name, enabled)?;
         }
     }
+    plugins::add_synced_claude_plugins(&mut entries, &config_dir.join("plugins/synced"));
+    plugins::add_codex_plugins(&mut entries, codex_home);
     // Later native definitions have precedence. A hidden duplicate cannot be
     // selected by origin when Claude itself resolves both by the same name.
     // The same manifest can explicitly list its default directories/files.
@@ -391,7 +400,7 @@ pub fn catalog_with_homes(home: &Path, config_dir: &Path, codex_home: &Path, roo
     entries.sort_by(|a, b| a.id.cmp(&b.id));
     skill_dependencies::annotate(&mut entries);
     Ok(ResourceCatalog { entries, local_only: false, notes: vec![
-        "Shared skills: .claude, .agents and .codex folders, plus installed Claude plugins. Legacy commands, enterprise/synced skills and cloud connectors are not listed. Skills may depend on tools or syntax specific to their original harness.".into(),
+        "Shared skills: .claude, .agents and .codex folders, plus installed Claude plugins, plugins synced from claude.ai and enabled Codex plugins. Legacy commands, enterprise/synced skills and cloud connectors are not listed. Skills may depend on tools or syntax specific to their original harness.".into(),
         "Selection controls model-invoked skills and MCP servers. File access, slash commands, plugin hooks and managed policies are separate.".into(),
     ] })
 }
@@ -548,9 +557,20 @@ pub struct PreparedClaudeSkills {
 fn add_external_skills(out: &mut Vec<ResourceEntry>, directory: &Path, group: &str, prefix: &str, source: &str) {
     let start = out.len();
     add_skills(out, directory, group, prefix, None, true);
-    for entry in &mut out[start..] {
+    bridge_skills(&mut out[start..], source);
+}
+
+/// Skills Claude Code does not load natively are linked into ephemeral
+/// single-skill plugins at launch (see `prepare_claude_skills`); Codex reads
+/// them by path either way.
+fn bridge_skills(entries: &mut [ResourceEntry], source: &str) {
+    for entry in entries.iter_mut().filter(|entry| entry.kind == "skill") {
+        let folder = entry.skill_path.as_ref().and_then(|path| path.parent()).and_then(Path::file_name)
+            .map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| entry.runtime_name.clone());
+        // A plugin skill may name itself `plugin:skill`; its bridge supplies the prefix.
         let original = entry.skill_path.as_ref().and_then(|path| std::fs::read_to_string(path).ok())
-            .and_then(|text| super::skills::parse_frontmatter(&text).name).unwrap_or_else(|| entry.runtime_name.clone());
+            .and_then(|text| super::skills::parse_frontmatter(&text).name)
+            .map(|name| name.rsplit(':').next().unwrap_or_default().to_string()).filter(|name| !name.is_empty()).unwrap_or(folder);
         let plugin = format!("tm-{}", &content_hash(entry.id.as_bytes())[..16]);
         entry.runtime_name = format!("{plugin}:{original}");
         entry.name = original;
