@@ -4741,12 +4741,14 @@ body.resizing-sidebar * {
   color: var(--text);
 }
 
-.project-menu {
+.project-menu,
+.session-menu {
   max-height: 100vh;
   overflow-y: auto;
 }
 
-.project-menu .context-item:disabled {
+.project-menu .context-item:disabled,
+.session-menu .context-item:disabled {
   opacity: 0.5;
   background: none;
   cursor: default;

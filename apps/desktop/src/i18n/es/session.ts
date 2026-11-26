@@ -53,6 +53,7 @@ export const session: Record<string, string> = {
   "{n} mentioned file or attachment": "{n} archivo mencionado o adjunto",
   "{n} mentioned files or attachments": "{n} archivos mencionados o adjuntos",
   "Move up": "Subir",
+  "New sessions at the top": "Sesiones nuevas al principio",
   "Move down": "Bajar",
   "Take it back into the composer": "Devolverlo al cuadro de texto",
   "Edit": "Editar",
