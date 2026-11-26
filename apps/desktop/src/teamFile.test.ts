@@ -34,6 +34,21 @@ describe("exporting teams", () => {
     team.orchestrator = { provider: "local", model: "@agent/@codex/model", resources: { skills: [], mcps: ["mcp:user:local"] } };
     expect(readTeamsFile(exportTeams([team])).teams[0]?.orchestrator).toEqual(team.orchestrator);
   });
+  it("keeps who may use agent chat, and reads anything else as the default", () => {
+    const open = preset("Open");
+    open.combo.agentChat = "all";
+    expect(JSON.parse(exportTeams([open])).teams[0].combo.agentChat).toBe("all");
+    expect(readTeamsFile(exportTeams([open])).teams[0]?.combo.agentChat).toBe("all");
+    const quiet = preset("Quiet");
+    quiet.combo.agentChat = "off";
+    expect(readTeamsFile(exportTeams([quiet])).teams[0]?.combo.agentChat).toBe("off");
+    const usual = preset("Usual");
+    usual.combo.agentChat = "cloud";
+    expect("agentChat" in JSON.parse(exportTeams([usual])).teams[0].combo).toBe(false);
+    const odd = JSON.parse(exportTeams([open]));
+    odd.teams[0].combo.agentChat = "everyone, always";
+    expect("agentChat" in readTeamsFile(JSON.stringify(odd)).teams[0]!.combo).toBe(false);
+  });
   it("writes the teams without ids, in a file that says what it is", () => {
     const file = JSON.parse(exportTeams([preset("Art crew"), preset("Solo")], [], new Date("2026-11-06T00:00:00Z")));
     expect(file).toMatchObject({ format: TEAMS_FORMAT, version: 1, exportedAt: "2026-11-06T00:00:00.000Z" });

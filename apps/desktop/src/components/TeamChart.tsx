@@ -6,7 +6,7 @@
  * hands both back.
  */
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { ORCHESTRATOR_PROVIDERS, PROVIDERS, PROVIDER_LABELS, WORKER_CAPABILITIES, type Combo, type OrchestratorChoice, type Provider, type ProviderModel, type WorkerSlot } from "@thingmaker/contracts";
+import { DEFAULT_AGENT_CHAT, ORCHESTRATOR_PROVIDERS, PROVIDERS, PROVIDER_LABELS, WORKER_CAPABILITIES, withAgentChat, type AgentChat, type Combo, type OrchestratorChoice, type Provider, type ProviderModel, type WorkerSlot } from "@thingmaker/contracts";
 import { api } from "../ipc";
 import { useStore } from "../store";
 import { MemberResources } from "./MemberResources";
@@ -114,6 +114,38 @@ function EffortSwitch({ model, value, onChange }: { model: ProviderModel | undef
           {effort}
         </button>
       ))}
+    </div>
+  );
+}
+
+/**
+ * Who on the team may message the others directly. Local models are left out
+ * unless everyone is let in: a message to a cloud agent is a way out of the
+ * sandbox a local model runs in.
+ */
+function AgentChatSwitch({ value, onChange }: { value: AgentChat; onChange: (value: AgentChat) => void }) {
+  const choices: [AgentChat, string][] = [
+    ["off", t("Nobody")],
+    ["cloud", t("Cloud agents")],
+    ["all", t("Everyone")],
+  ];
+  return (
+    <div className="field">
+      {t("Agent chat")}
+      <div aria-label={t("Agent chat")} className="chart-seg" role="group">
+        {choices.map(([choice, label]) => (
+          <button aria-pressed={value === choice} className={value === choice ? "on" : ""} key={choice} onClick={() => onChange(choice)} type="button">
+            {label}
+          </button>
+        ))}
+      </div>
+      <span className="small muted">
+        {value === "off"
+          ? t("Helpers only report to the lead.")
+          : value === "all"
+            ? t("Everyone on the team may message the others, local models too. A local model can then ask a cloud agent for something from the internet.")
+            : t("Agents on cloud providers may message each other. Local models are left out, so they stay offline.")}
+      </span>
     </div>
   );
 }
@@ -550,6 +582,7 @@ export function TeamChart({ orchestrator, combo, onChange }: { orchestrator: Orc
             <input checked={combo.nativeSubagents} onChange={(event) => onChange(orchestrator, { ...combo, nativeSubagents: event.target.checked })} type="checkbox" />
             {t("It may also start its own {provider} subagents", { provider: PROVIDER_LABELS[orchestrator.provider] })}
           </label>
+          <AgentChatSwitch onChange={(agentChat) => onChange(orchestrator, withAgentChat(combo, agentChat))} value={combo.agentChat ?? DEFAULT_AGENT_CHAT} />
         </section>
       ) : selectedWorker && typeof selected === "number" ? (
         <section aria-label={selectedWorker.name} className="chart-inspector">

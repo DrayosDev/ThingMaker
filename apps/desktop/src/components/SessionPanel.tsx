@@ -26,6 +26,8 @@ import { ImagesPane } from "./ImagesPane";
 import { OdysseyPane } from "./OdysseyPane";
 import { UltraReviewPane, useUltraReviewLabel } from "./UltraReview";
 import { BigThingBand, BigThingTurnCard, SideNotesCard } from "./BigThingLinks";
+import { TeamChatBand, TeamChatTurn } from "./TeamChat";
+import { teamChatOf } from "../teamChatTurns";
 import { BackgroundTasksButton } from "./BackgroundTasks";
 import { bigThingTurnOf, splitSideNotes, userMessageText } from "../bigThingTurns";
 import { DocumentWarnings } from "./DocumentWarnings";
@@ -240,7 +242,7 @@ function sameImages(a: ImageRef[] | undefined, b: ImageRef[] | undefined): boole
  * times a second, and redrawing — re-parsing the Markdown of — every visible
  * message on each update is what made a long session heavy to open.
  */
-const CardView = memo(
+export const CardView = memo(
   function CardView({ card, sessionId, images }: CardViewProps) {
     const workspaceId = useStore((s) => s.sessions[sessionId]?.workspaceId ?? "");
     const view = <CardBody card={card} sessionId={sessionId} />;
@@ -324,6 +326,24 @@ function ForkFromHere({ sessionId, cardKey }: { sessionId: string; cardKey: stri
   );
 }
 
+/**
+ * The person's own message. The right-hand bubble is always the person: no
+ * name over it. Its actions sit under it, shown on hover.
+ */
+function PersonMessage({ card, sessionId }: { card: Extract<Card, { kind: "message" }>; sessionId: string }) {
+  const workspaceId = useStore((s) => s.sessions[sessionId]?.workspaceId ?? "");
+  const openUrl = useStore((s) => s.openUrl);
+  return (
+    <div className="message-user">
+      <article className="card card-user" title={card.message.messageId}>
+        {card.message.contentUnknown && <span className="chip chip-warn small">{t("content not supplied")}</span>}
+        <Blocks blocks={shownBlocks(card)} markdown={false} onLink={(url) => (opensInPanel(url) ? openArtifact(url) : void openUrl(url))} workspaceId={workspaceId} />
+      </article>
+      <MessageActions card={card} sessionId={sessionId} />
+    </div>
+  );
+}
+
 function CardBody({ card, sessionId }: { card: Card; sessionId: string }) {
   // Narrow selections, so an update elsewhere in the session does not
   // redraw this card.
@@ -358,8 +378,18 @@ function CardBody({ card, sessionId }: { card: Card; sessionId: string }) {
         );
       }
       if (card.message.role === "user") {
-        // Big Thing's own prompts are not the user's words.
         const text = userMessageText(card);
+        // A message another agent of the team sent this one: an agent's
+        // words, drawn as an agent's once the host vouches for it.
+        const chat = teamChatOf(text);
+        if (chat) {
+          return (
+            <TeamChatTurn own={<PersonMessage card={card} sessionId={sessionId} />} sessionId={sessionId} token={chat.token}>
+              <Blocks blocks={[{ type: "text", text: chat.body }]} markdown onLink={onLink} workspaceId={workspaceId} />
+            </TeamChatTurn>
+          );
+        }
+        // Big Thing's own prompts are not the user's words.
         const turn = bigThingTurnOf(card.message.messageId, text);
         if (turn) return <BigThingTurnCard card={card} sessionId={sessionId} text={text} turn={turn} />;
         // Nor are the reports nested sessions passed on, or notes the side
@@ -369,19 +399,7 @@ function CardBody({ card, sessionId }: { card: Card; sessionId: string }) {
         if (nested.reports.length > 0) return <NestedReportsCard own={rest} reports={nested.reports} />;
         if (notes.length > 0) return <SideNotesCard notes={notes} own={rest} />;
       }
-      if (card.message.role === "user") {
-        // The right-hand bubble is always the person: no name over it. Its
-        // actions sit under it, shown on hover.
-        return (
-          <div className="message-user">
-            <article className="card card-user" title={card.message.messageId}>
-              {card.message.contentUnknown && <span className="chip chip-warn small">{t("content not supplied")}</span>}
-              <Blocks blocks={shownBlocks(card)} markdown={false} onLink={onLink} workspaceId={workspaceId} />
-            </article>
-            <MessageActions card={card} sessionId={sessionId} />
-          </div>
-        );
-      }
+      if (card.message.role === "user") return <PersonMessage card={card} sessionId={sessionId} />;
       return (
         <article className={`card card-${card.message.role}`}>
           <header className="small muted" title={card.message.messageId}>
@@ -1167,6 +1185,7 @@ export function SessionPanel({ sessionId }: { sessionId: string }) {
             </div>
           )}
           <BigThingBand sessionId={sessionId} />
+          <TeamChatBand sessionId={sessionId} />
           <div aria-busy={active} className="transcript" ref={transcriptRef}>
             <EarlierConversation sessionId={sessionId} />
             {transcriptGroups.map((group, index, groups) => (

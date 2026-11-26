@@ -53,7 +53,7 @@ import type {
   ProviderVersion,
   TurnPhase,
 } from "@thingmaker/contracts";
-import { EMPTY_COMBO, JOB_EVENT, ULTRA_REVIEW_EVENT, type UltraReview, type UrDecision, type UrStartRequest, SESSION_TITLE_EVENT, type SessionTitleChange, ODYSSEY_STATE_NOTE, PROVIDERS, PROVIDER_LABELS, BIGTHING_EVENT, asConfigOptions, ACCOUNT_PROVIDERS, isEffortOption, isRetiredModel, localAgentHarness, parseLocalModel, type LocalSessionSetup, type AccountView, type Combo, type JobView, type ProviderModel, type BigThingEvent, type BigThingRuntime, type NestedReport, type TeamPreset, type RenameReport, type WipeReport, type WorkerSlot } from "@thingmaker/contracts";
+import { EMPTY_COMBO, JOB_EVENT, TEAM_CHAT_EVENT, type TeamChatView, ULTRA_REVIEW_EVENT, type UltraReview, type UrDecision, type UrStartRequest, SESSION_TITLE_EVENT, type SessionTitleChange, ODYSSEY_STATE_NOTE, PROVIDERS, PROVIDER_LABELS, BIGTHING_EVENT, asConfigOptions, ACCOUNT_PROVIDERS, isEffortOption, isRetiredModel, localAgentHarness, parseLocalModel, type LocalSessionSetup, type AccountView, type Combo, type JobView, type ProviderModel, type BigThingEvent, type BigThingRuntime, type NestedReport, type TeamPreset, type RenameReport, type WipeReport, type WorkerSlot } from "@thingmaker/contracts";
 import { isLocalChat } from "./localModels";
 import { HANDOFF_SPLIT, handoffBrief, hasConversation, helperPresetFrom, readHelperPresets, readPresets, upsertHelperPreset, upsertJob, upsertPreset, withoutHandoff, type HelperPreset } from "./team";
 import { copiesItself, forkBranch, forkTitle, type ForkPoint } from "./fork";
@@ -256,6 +256,15 @@ type State = {
   teams: Record<string, Combo>;
   /** Jobs per orchestrator session (by attachment handle), oldest first. */
   jobs: Record<string, JobView[]>;
+  /** Each live session's agent chat, as the host last reported it. */
+  teamChat: Record<string, TeamChatView>;
+  /** Reads a session's agent chat again; false when the host could not say. */
+  loadTeamChat: (sessionId: string) => Promise<boolean>;
+  /** Tokens of prompts shaped like an agent's message that the host has no
+   *  receipt for in that session: the person's own text, shown as theirs. */
+  teamChatUnknown: Record<string, string[]>;
+  /** Asks the host whether it wrote the prompt with this token into the session. */
+  checkTeamChat: (sessionId: string, token: string) => Promise<void>;
   /** Ultra-Reviews per session, by the agent's id for it, newest first. */
   ultraReviews: Record<string, UltraReview[]>;
   loadUltraReviews: (host: string) => Promise<void>;
@@ -1025,6 +1034,9 @@ function refreshAccountModels(get: Get, set: Set, provider: Provider) {
   void get().loadProviderModels(provider, true);
 }
 
+/** Receipt checks under way, by session and token, so a card redrawn while one runs does not ask again. */
+const teamChatChecks = new Set<string>();
+
 export const useStore = create<State>((set, get) => ({
   providers: null,
   providerVersions: null,
@@ -1054,6 +1066,8 @@ export const useStore = create<State>((set, get) => ({
   drafts: {},
   teams: {},
   jobs: {},
+  teamChat: {},
+  teamChatUnknown: {},
   ultraReviews: {},
   defaultCombo: EMPTY_COMBO,
   providerModels: {},
@@ -1164,6 +1178,7 @@ export const useStore = create<State>((set, get) => ({
       }
       void get().loadQuickChats();
       void listen<JobView>(JOB_EVENT, (event) => get().noteJob(event.payload));
+      void listen<{ handle: string }>(TEAM_CHAT_EVENT, (event) => void get().loadTeamChat(event.payload.handle));
       void listen<UltraReview>(ULTRA_REVIEW_EVENT, (event) => get().noteUltraReview(event.payload));
       void listen<BigThingEvent>(BIGTHING_EVENT, (event) => get().noteBigThing(event.payload));
       void listen<SessionTitleChange>(SESSION_TITLE_EVENT, (event) => get().noteSessionTitle(event.payload));
@@ -2662,6 +2677,36 @@ export const useStore = create<State>((set, get) => ({
       return models;
     } catch {
       return [];
+    }
+  },
+
+  async loadTeamChat(sessionId) {
+    const session = get().sessions[sessionId];
+    if (!session) return false;
+    try {
+      const view = await api.delegationChat(session.handle);
+      if (!view || !Array.isArray(view.messages)) return false;
+      // Asked for often while the chat is on screen: an unchanged answer
+      // redraws nothing.
+      if (JSON.stringify(get().teamChat[sessionId]) !== JSON.stringify(view)) set({ teamChat: { ...get().teamChat, [sessionId]: view } });
+      return true;
+    } catch {
+      return false;
+    }
+  },
+
+  async checkTeamChat(sessionId, token) {
+    const known = () => get().teamChat[sessionId]?.received?.some((receipt) => receipt.token === token) ?? false;
+    const check = `${sessionId}|${token}`;
+    if (known() || get().teamChatUnknown[sessionId]?.includes(token) || teamChatChecks.has(check)) return;
+    teamChatChecks.add(check);
+    try {
+      // The host keeps a receipt before it writes the prompt, so one read
+      // settles it: there, or never written by the host.
+      await get().loadTeamChat(sessionId);
+      if (!known()) set({ teamChatUnknown: { ...get().teamChatUnknown, [sessionId]: [...(get().teamChatUnknown[sessionId] ?? []), token] } });
+    } finally {
+      teamChatChecks.delete(check);
     }
   },
 

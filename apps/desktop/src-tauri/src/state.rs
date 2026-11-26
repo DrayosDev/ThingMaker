@@ -225,6 +225,17 @@ impl AppState {
         Arc::clone(&self.auth_runs)
     }
 
+    /// Whether a live attachment is already on this conversation, by its
+    /// handle or by the id its agent keeps it under. A second process on it
+    /// would write the same transcript.
+    pub fn conversation_attached(&self, agent_session_id: &str) -> bool {
+        self.agent_session_ids
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .any(|(handle, agent)| handle == agent_session_id || agent == agent_session_id)
+    }
+
     pub fn actor_ids(&self) -> Vec<String> {
         self.actors
             .lock()
@@ -428,6 +439,20 @@ mod account_tests {
             std::fs::write(folder, "not a directory").unwrap();
             assert!(state.try_account_folder(provider, Some("work")).is_err());
         }
+    }
+
+    #[test]
+    fn a_conversation_is_attached_under_its_handle_or_the_agents_own_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::initialize(dir.path(), None).unwrap();
+        assert!(!state.conversation_attached("agent-1"));
+        // A worker a delegation opened: a reserved handle, the agent's id apart.
+        state.agent_session_ids.lock().unwrap().insert("reserved-handle".into(), "agent-1".into());
+        assert!(state.conversation_attached("agent-1"), "resuming it would start a second process");
+        assert!(state.conversation_attached("reserved-handle"));
+        assert!(!state.conversation_attached("agent-2"));
+        state.remove_actor("reserved-handle");
+        assert!(!state.conversation_attached("agent-1"), "closed: free to reopen");
     }
 
     #[test]

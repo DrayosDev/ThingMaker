@@ -6,7 +6,7 @@
  * handoff. The host owns the team and runs the jobs; nothing here decides
  * where work goes.
  */
-import { PROVIDER_LABELS, type Combo, type JobView, type Provider, type ProviderModel, type TeamPreset, type WorkerSlot } from "@thingmaker/contracts";
+import { DEFAULT_AGENT_CHAT, PROVIDER_LABELS, type Combo, type JobView, type Provider, type ProviderModel, type TeamPreset, type WorkerSlot } from "@thingmaker/contracts";
 import { t } from "./i18n";
 import type { Card } from "./projection";
 
@@ -224,6 +224,6 @@ export function presetMatches(preset: TeamPreset, provider: Provider, combo: Com
   // No helpers is no team: a session on its own is free to change model and
   // provider, rather than "running" a lead-only preset such as Solo.
   if (!combo || combo.workers.length === 0 || preset.orchestrator.provider !== provider) return false;
-  const strip = (value: Combo) => JSON.stringify({ workers: value.workers, nativeSubagents: value.nativeSubagents });
+  const strip = (value: Combo) => JSON.stringify({ workers: value.workers, nativeSubagents: value.nativeSubagents, agentChat: value.agentChat ?? DEFAULT_AGENT_CHAT });
   return strip(preset.combo) === strip(combo);
 }

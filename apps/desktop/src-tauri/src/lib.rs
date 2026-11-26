@@ -438,6 +438,7 @@ pub fn run() {
             commands::delegation::delegation_combo_set,
             commands::delegation::delegation_default_combo_get,
             commands::delegation::delegation_default_combo_set,
+            commands::delegation::delegation_chat,
             commands::delegation::delegation_jobs,
             commands::delegation::delegation_job_cancel,
             commands::delegation::delegation_quota,

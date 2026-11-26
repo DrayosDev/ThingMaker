@@ -43,6 +43,7 @@ function JobRow({ job, sessionId, now }: { job: JobView; sessionId: string; now:
           {job.effort ? ` · ${job.effort}` : ""} · {jobDuration(job, now)}
           {job.toolCalls > 0 ? ` · ${job.toolCalls === 1 ? t("1 tool call") : t("{count} tool calls", { count: job.toolCalls })}` : ""}
           {job.continues ? ` · ${t("follows {job}", { job: job.continues })}` : ""}
+          {job.chat ? ` · ${t("answering a team message")}` : ""}
         </span>
         <span className="composer-spacer" />
         {job.workerSession && (

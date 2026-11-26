@@ -161,7 +161,7 @@ async fn a_claude_orchestrator_delegates_to_a_gemini_worker() {
     options.append_system_prompt = Some(orchestrator_guidance(true));
     let agent = AgentLaunch::Claude(options);
     let key = agent.session_id();
-    let token = delegation.register(&key, Provider::Claude, scratch.path().to_path_buf(), Combo { workers: vec![worker], native_subagents: false });
+    let token = delegation.register(&key, Provider::Claude, scratch.path().to_path_buf(), Combo { workers: vec![worker], native_subagents: false, ..Default::default() });
     let mut config = SessionActorConfig::new(LaunchTarget::executable(node), agent);
     config.mcp_servers = vec![server_entry(&PathBuf::from(env!("CARGO_BIN_EXE_thingmaker-mcp")), &[], socket.path(), &token)];
     config.environment = config.environment.clone().with_set("MCP_TOOL_TIMEOUT", "1800000");

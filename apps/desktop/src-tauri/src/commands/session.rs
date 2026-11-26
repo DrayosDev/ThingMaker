@@ -382,7 +382,7 @@ pub async fn session_open(request: OpenRequest, state: State<'_, AppState>) -> C
     // By the handle, and by the agent's own id: a worker opened by a
     // delegation is addressed by a reserved handle, and resuming its id would
     // start a second process on a session the first one is still writing.
-    let running_elsewhere = matches!(&request.mode, OpenRequestMode::Resume { session_id } if state.actor_ids().iter().any(|id| state.agent_session_id(id) == *session_id));
+    let running_elsewhere = matches!(&request.mode, OpenRequestMode::Resume { session_id } if state.conversation_attached(session_id));
     if state.actor(session_id.as_str()).is_some() || running_elsewhere {
         return Err(DesktopError::conflict(
             "This session is already attached in this application. Use the existing attachment instead of starting a second agent process.",
@@ -645,6 +645,7 @@ pub async fn session_submit(request: SubmitRequest, state: State<'_, AppState>) 
         return Err(DesktopError::io("invalid request id"));
     }
     let actor = actor_for(&state, &request.handle)?;
+    super::delegation::note_person(&state, &request.handle.id);
     let root = state
         .actor_entries()
         .into_iter()
@@ -799,6 +800,7 @@ pub async fn session_enqueue(request: EnqueueRequest, state: State<'_, AppState>
         return Err(DesktopError::io("the queued prompt's composer state is too large"));
     }
     let actor = actor_for(&state, &request.handle)?;
+    super::delegation::note_person(&state, &request.handle.id);
     let root = state
         .actor_entries()
         .into_iter()
@@ -841,6 +843,7 @@ pub async fn session_steer(request: SteerRequest, state: State<'_, AppState>) ->
         return Err(DesktopError::io("steer text is empty"));
     }
     let actor = actor_for(&state, &request.handle)?;
+    super::delegation::note_person(&state, &request.handle.id);
     actor.steer_text(&request.text).await
 }
 

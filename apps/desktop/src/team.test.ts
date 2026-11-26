@@ -135,5 +135,8 @@ describe("team presets", () => {
     expect(presetMatches({ ...preset, orchestrator: { provider: "claude", model: "opus" } }, "claude", preset.combo)).toBe(true);
     expect(presetMatches(preset, "codex", preset.combo)).toBe(false);
     expect(presetMatches(preset, "claude", { workers: [], nativeSubagents: false })).toBe(false);
+    // Who may use agent chat is part of the team; the default written out is the same team.
+    expect(presetMatches(preset, "claude", { ...preset.combo, agentChat: "all" })).toBe(false);
+    expect(presetMatches(preset, "claude", { ...preset.combo, agentChat: "cloud" })).toBe(true);
   });
 });

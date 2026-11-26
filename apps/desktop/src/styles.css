@@ -2414,6 +2414,12 @@ body.resizing-sidebar * {
   margin-top: 0;
 }
 
+/* A message another agent of the team sent this one: where an answer is,
+   under its sender's mark and name, and never the person's bubble. */
+.card-team-chat .team-chat-from {
+  margin-bottom: 2px;
+}
+
 /* A message's copy/fork: icons on a row under it, shown while the pointer is
    over the message. The row keeps its room, so nothing moves on hover. */
 .message-user {

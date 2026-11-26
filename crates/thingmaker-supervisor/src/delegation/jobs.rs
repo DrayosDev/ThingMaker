@@ -12,6 +12,8 @@
 //! once and `await_jobs` waits under a bound, because an MCP client gives up
 //! on a tool call long before real work is done.
 
+pub mod chat;
+
 use std::{
     collections::HashMap,
     future::Future,
@@ -133,6 +135,9 @@ pub struct WorkerSpec {
     /// The token the worker's own reduced `team` server authenticates with
     /// (memory and board, no delegation), for a provider that can load one.
     pub mcp_token: Option<String>,
+    pub resume: Option<String>,
+    /// Revision recorded for a conversation being reopened.
+    pub resume_revision: Option<String>,
 }
 
 /// Who is calling the `team` server.
@@ -205,7 +210,17 @@ pub trait WorkerLauncher: Send + Sync {
     }
     /// A worker the service has stopped; the host drops its registration.
     fn released(&self, worker_handle: &str);
+    /// Whether the host already has a live attachment on this conversation,
+    /// by the id its provider keeps it under. A closed worker's conversation
+    /// is an ordinary session the person can open; reopening it for a chat
+    /// message then would start a second process writing the same transcript.
+    fn attached(&self, _agent_session_id: &str) -> bool {
+        false
+    }
 }
+
+/// What a message says when its recipient's conversation is open elsewhere.
+pub const WORKER_OPEN_ELSEWHERE: &str = "This worker's conversation is open in another ThingMaker session, so it was not reopened. Close that session, or write to the worker there.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -278,6 +293,11 @@ pub struct JobView {
     /// Taken by a worker that had already done an earlier job, keeping its context.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub warm: bool,
+    /// Started by a message from another agent, not by the orchestrator's
+    /// `delegate`: it takes none of the orchestrator's job slots and is not
+    /// among the jobs it awaits by default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub chat: bool,
 }
 
 /// What `delegate` takes.
@@ -316,6 +336,7 @@ fn team_for(combo: &Combo, args: &DelegateArgs, lead: Provider) -> Combo {
 }
 
 struct Orchestrator {
+    chat: chat::Room,
     provider: Provider,
     root: PathBuf,
     combo: Combo,
@@ -323,6 +344,8 @@ struct Orchestrator {
 }
 
 struct JobRecord {
+    address: String,
+    chat_message: Option<usize>,
     view: JobView,
     slot: WorkerSlot,
     revision: Option<String>,
@@ -363,6 +386,10 @@ struct Inner {
     /// Local models share this computer's GPU, so one local job runs at a
     /// time; two side by side would each crawl.
     local_gate: Arc<tokio::sync::Semaphore>,
+    /// Who hears what happens in the sessions' chats.
+    chat_listener: std::sync::RwLock<Option<chat::ChatListener>>,
+    /// How long a chat message waits for its recipient.
+    chat_expiry: Mutex<Duration>,
 }
 
 /// What a local job waiting its turn says.
@@ -406,6 +433,8 @@ impl Delegation {
                 reaper: std::sync::atomic::AtomicBool::new(false),
                 idle: Mutex::new(WORKER_IDLE),
                 local_gate: Arc::new(tokio::sync::Semaphore::new(1)),
+                chat_listener: std::sync::RwLock::new(None),
+                chat_expiry: Mutex::new(chat::DELIVERY_EXPIRY),
             }),
         }
     }
@@ -427,7 +456,7 @@ impl Delegation {
         }
         let token = uuid::Uuid::new_v4().simple().to_string();
         state.tokens.insert(token.clone(), session.to_string());
-        state.orchestrators.insert(session.to_string(), Orchestrator { provider, root, combo: combo.normalized(), token: token.clone() });
+        state.orchestrators.insert(session.to_string(), Orchestrator { chat: chat::Room::default(), provider, root, combo: combo.normalized(), token: token.clone() });
         token
     }
 
@@ -550,15 +579,16 @@ impl Delegation {
         self.inner.changed.send_modify(|value| *value = value.wrapping_add(1));
     }
 
-    fn update(&self, id: &str, change: impl FnOnce(&mut JobRecord)) {
+    fn update(&self, id: &str, change: impl FnOnce(&mut JobRecord)) -> bool {
         let view = {
             let mut state = self.state();
-            let Some(record) = state.jobs.get_mut(id) else { return };
+            let Some(record) = state.jobs.get_mut(id) else { return false };
             change(record);
             record.view.clone()
         };
         (self.inner.on_change)(&view);
         self.bump();
+        true
     }
 
     /// The revision of each member a job for `args` could go to, worked out
@@ -580,14 +610,22 @@ impl Delegation {
 
     /// Starts a job and answers at once with its view.
     pub fn delegate(&self, session: &str, args: DelegateArgs) -> Result<JobView, String> {
+        self.delegate_inner(session, args, None)
+    }
+
+    fn delegate_inner(&self, session: &str, args: DelegateArgs, chat_message: Option<usize>) -> Result<JobView, String> {
         let task = args.task.trim();
         if task.is_empty() {
             return Err("The task is empty. Describe the work the worker should do.".into());
         }
+        // What the jobs list and the worker's title say of a job a chat
+        // message started: the message, not the wrapper it travels in.
+        let shown = chat_message.and_then(|id| self.state().orchestrators.get(session).and_then(|team| team.chat.summary(id)));
+        let shown = shown.as_deref().unwrap_or(task);
         let now = now_unix_ms();
         let mut queued: Option<(Wait, u64)>;
         let mut attempt = 0;
-        let (view, slot, reuse, root, orchestrator_provider) = loop {
+        let (view, slot, reuse, root, orchestrator_provider, resume, resume_revision) = loop {
             attempt += 1;
             queued = None;
             // Worked out before the lock: resolving a member's resources reads
@@ -601,16 +639,24 @@ impl Delegation {
             let root = orchestrator.root.clone();
             let orchestrator_provider = orchestrator.provider;
             let combo = team_for(&orchestrator.combo, &args, orchestrator.provider);
+            // The orchestrator's slots are for the work it gave out. A job a
+            // chat message started has a smaller allowance of its own.
             let running = state
                 .order
                 .get(session)
                 .into_iter()
                 .flatten()
-                .filter(|id| state.jobs.get(*id).is_some_and(|record| record.view.status.is_active()))
+                .filter(|id| state.jobs.get(*id).is_some_and(|record| record.view.status.is_active() && record.view.chat == chat_message.is_some()))
                 .count();
-            if running >= MAX_RUNNING_JOBS {
+            if chat_message.is_some() {
+                if running >= chat::MAX_CHAT_JOBS {
+                    return Err(format!("{running} workers are already answering chat messages."));
+                }
+            } else if running >= MAX_RUNNING_JOBS {
                 return Err(format!("{running} jobs are already running; await some before delegating more."));
             }
+            let mut resume = None;
+            let mut resume_revision = None;
             let (route, reuse) = match args.continue_job.as_deref().filter(|id| !id.trim().is_empty()) {
                 Some(previous) => {
                     let Some(record) = state.jobs.get(previous).filter(|record| record.view.orchestrator == session) else {
@@ -627,13 +673,22 @@ impl Delegation {
                     if !same_abilities(current, &record.slot) || revision? != record.revision {
                         return Err("This worker's configuration changed. Delegate a new job to start a fresh session with its current resources.".into());
                     }
-                    let Some(actor) = record.actor.clone() else {
-                        return Err(format!("Job {previous}'s worker is no longer open; delegate a new job instead."));
-                    };
-                    if state.jobs.values().any(|other| !other.view.status.is_finished() && other.view.worker_session.as_deref() == Some(actor.handle().id.as_str())) {
+                    let route = Route { slot: current.clone(), rerouted_from: None };
+                    if state.jobs.values().any(|other| other.view.orchestrator == session && other.address == record.address && !other.view.status.is_finished()) {
                         return Err(format!("Job {previous}'s worker is busy with another follow-up."));
                     }
-                    (Route { slot: current.clone(), rerouted_from: None }, Some((previous.to_string(), actor)))
+                    if let Some(actor) = record.actor.clone() {
+                        (route, Some((previous.to_string(), actor)))
+                    } else if chat_message.is_some() && record.view.worker_closed {
+                        if orchestrator.chat.closing.contains(&record.address) {
+                            return Err("The worker is finishing its idle shutdown.".into());
+                        }
+                        resume = Some(record.view.agent_session_id.clone().ok_or("The worker has no saved conversation.")?);
+                        resume_revision = record.revision.clone();
+                        (route, None)
+                    } else {
+                        return Err(format!("Job {previous}'s worker is no longer open; delegate a new job instead."));
+                    }
                 }
                 None => match route(&combo, args.worker.as_deref(), args.capability.as_deref(), &state.quotas, &[], now) {
                     Ok(route) => (route, None),
@@ -661,7 +716,7 @@ impl Delegation {
                 return Err(TEAM_CHANGED.into());
             };
             let revision = revision?;
-            let warm = if reuse.is_none() && queued.is_none() { warm_worker(&state, session, &route.slot, &revision) } else { None };
+            let warm = if reuse.is_none() && resume.is_none() && queued.is_none() { warm_worker(&state, session, &route.slot, &revision) } else { None };
             let reuse = reuse.or_else(|| warm.clone().map(|actor| (String::new(), actor)));
             state.serial += 1;
             let id = format!("job-{}", state.serial);
@@ -672,22 +727,26 @@ impl Delegation {
                 provider: route.slot.provider,
                 model: route.slot.model.clone(),
                 effort: route.slot.effort.clone(),
-                task: cap(task, 2_000),
+                task: cap(shown, 2_000),
                 status: if queued.is_some() { JobStatus::Waiting } else { JobStatus::Starting },
                 result: None,
                 error: None,
                 rerouted_from: route.rerouted_from.clone(),
-                continues: reuse.as_ref().map(|(previous, _)| previous.clone()).filter(|previous| !previous.is_empty()),
+                // Only a job that really follows another: an agent that fills
+                // in `continue_job: ""` is starting a fresh worker, which
+                // needs the brief and its standing instructions.
+                continues: args.continue_job.as_deref().map(str::trim).filter(|previous| !previous.is_empty()).map(str::to_string),
                 worker_session: reuse.as_ref().map(|(_, actor)| actor.handle().id.clone()),
-                agent_session_id: None,
+                agent_session_id: resume.clone(),
                 tool_calls: 0,
                 attempts: 0,
                 waiting_reason: queued.as_ref().map(|(wait, _)| wait.limit.reason.clone()),
                 retry_at_unix_ms: queued.as_ref().map(|(_, at)| *at),
                 started_at_unix_ms: now,
                 finished_at_unix_ms: None,
-                worker_closed: false,
+                worker_closed: resume.is_some(),
                 warm: warm.is_some(),
+                chat: chat_message.is_some(),
             };
             let token = reuse.is_none().then(|| uuid::Uuid::new_v4().simple().to_string());
             if let Some(token) = &token {
@@ -696,9 +755,13 @@ impl Delegation {
                     WorkerIdentity { orchestrator: session.to_string(), provider: route.slot.provider, root: root.clone(), name: route.slot.name.clone(), job_id: id.clone() },
                 );
             }
-            state.jobs.insert(id.clone(), JobRecord { view: view.clone(), slot: route.slot.clone(), revision, actor: reuse.as_ref().map(|(_, actor)| actor.clone()), token });
+            let address = args.continue_job.as_ref().and_then(|id| state.jobs.get(id)).or_else(|| {
+                let handle = view.worker_session.as_ref()?;
+                state.jobs.values().find(|r| r.view.orchestrator == session && r.view.worker_session.as_ref() == Some(handle))
+            }).map(|record| record.address.clone()).unwrap_or_else(|| id.clone());
+            state.jobs.insert(id.clone(), JobRecord { address, chat_message, view: view.clone(), slot: route.slot.clone(), revision, actor: reuse.as_ref().map(|(_, actor)| actor.clone()), token });
             state.order.entry(session.to_string()).or_default().push(id);
-            break (view, route.slot, reuse.map(|(_, actor)| actor), root, orchestrator_provider);
+            break (view, route.slot, reuse.map(|(_, actor)| actor), root, orchestrator_provider, resume, resume_revision);
         };
         (self.inner.on_change)(&view);
         self.bump();
@@ -708,13 +771,26 @@ impl Delegation {
         if view.warm {
             prompt = format!("Your previous task is finished. This is a new one: treat it on its own, using what you learned only where it applies.\n\n{prompt}");
         }
+        if chat_message.is_some() {
+            prompt = task.to_string();
+        }
+        let caller = Caller::Worker { orchestrator: session.into(), root: root.clone(), name: slot.name.clone(), provider: slot.provider, job_id: view.id.clone() };
+        if slot.provider == Provider::Gemini && self.chat_open_to(&caller) {
+            let members = serde_json::Value::Array(self.chat_members(&caller));
+            prompt.push_str(&format!("\nTeam chat addresses: {members}. To send or reply, finish with a line TEAM_CHAT followed by a JSON object with string fields to and text, and optional numeric reply_to."));
+            // It has no tool call to hear this through.
+            let undelivered = self.chat_undelivered(&caller);
+            if !undelivered.is_empty() {
+                prompt.push_str(&format!("\nTeam chat messages of yours that were not delivered: {}.", serde_json::Value::Array(undelivered)));
+            }
+        }
         self.ensure_reaper();
         let service = self.clone();
         let job_id = view.id.clone();
-        let summary: String = task.lines().next().unwrap_or(task).chars().take(60).collect();
+        let summary: String = shown.lines().next().unwrap_or(shown).chars().take(60).collect();
         let title = format!("{} · {summary}", slot.name);
         let mcp_token = self.state().jobs.get(&job_id).and_then(|record| record.token.clone());
-        let spec = WorkerSpec { orchestrator: session.to_string(), root, slot, job_id: job_id.clone(), title, mcp_token };
+        let spec = WorkerSpec { orchestrator: session.to_string(), root, slot, job_id: job_id.clone(), title, mcp_token, resume, resume_revision };
         let queued = queued.map(|(wait, _)| wait);
         tokio::spawn(async move { service.run(job_id, spec, prompt, reuse, args, queued).await });
         Ok(view)
@@ -788,6 +864,10 @@ impl Delegation {
             let worker = match actor.take() {
                 Some(worker) => worker,
                 None => {
+                    if spec.resume.as_deref().is_some_and(|conversation| self.inner.launcher.attached(conversation)) {
+                        self.finish(&job_id, JobStatus::Failed, None, Some(WORKER_OPEN_ELSEWHERE.into()));
+                        return;
+                    }
                     // A queued/rerouted job may now use a different account or
                     // config than when it was accepted. Record the launch's
                     // revision, not the stale scheduling-time revision.
@@ -805,14 +885,25 @@ impl Delegation {
             };
             let handle = worker.handle().id.clone();
             let agent_session_id = worker.snapshot().await.ok().and_then(|snapshot| snapshot.agent_session_id);
-            self.update(&job_id, |record| {
+            if spec.resume.is_some() && agent_session_id != spec.resume {
+                let _ = worker.stop().await;
+                self.inner.launcher.released(&handle);
+                self.finish(&job_id, JobStatus::Failed, None, Some("The provider did not restore the original conversation.".into()));
+                return;
+            }
+            if !self.update(&job_id, |record| {
+                record.view.worker_closed = false;
                 record.actor = Some(worker.clone());
                 record.view.worker_session = Some(handle.clone());
                 record.view.agent_session_id = agent_session_id.clone();
                 if record.view.status != JobStatus::Cancelled {
                     record.view.status = JobStatus::Running;
                 }
-            });
+            }) {
+                let _ = worker.stop().await;
+                self.inner.launcher.released(&handle);
+                return;
+            }
             if self.cancelled(&job_id) {
                 let _ = worker.cancel().await;
                 return;
@@ -820,6 +911,9 @@ impl Delegation {
             let outcome = self.turn(&job_id, &worker, &next_prompt).await;
             match outcome {
                 TurnOutcome::Done { text, limited: None } => {
+                    if spec.slot.provider == Provider::Gemini {
+                        self.gemini_messages(&spec, &text);
+                    }
                     self.finish(&job_id, JobStatus::Succeeded, Some(text), None);
                     return;
                 }
@@ -1003,7 +1097,7 @@ impl Delegation {
     pub async fn reap_idle(&self) {
         let idle = *self.inner.idle.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let now = now_unix_ms();
-        let (closing, views) = {
+        let (closing, views, closing_addresses) = {
             let mut state = self.state();
             let mut handles: HashMap<String, (SessionActor, u64, bool)> = HashMap::new();
             for record in state.jobs.values() {
@@ -1021,12 +1115,14 @@ impl Delegation {
                 .map(|(handle, (actor, _, _))| (handle, actor))
                 .collect();
             let mut views = Vec::new();
+            let mut closing_addresses = Vec::new();
             for (handle, _) in &closing {
                 let mut tokens = Vec::new();
                 for record in state.jobs.values_mut() {
                     if record.view.worker_session.as_deref() == Some(handle.as_str()) {
                         record.actor = None;
                         record.view.worker_closed = true;
+                        closing_addresses.push((record.view.orchestrator.clone(), record.address.clone()));
                         tokens.extend(record.token.take());
                         views.push(record.view.clone());
                     }
@@ -1035,11 +1131,24 @@ impl Delegation {
                     state.worker_tokens.remove(&token);
                 }
             }
-            (closing, views)
+            for (session, address) in &closing_addresses {
+                if let Some(team) = state.orchestrators.get_mut(session) {
+                    team.chat.closing.insert(address.clone());
+                }
+            }
+            (closing, views, closing_addresses)
         };
         for (handle, actor) in closing {
             let _ = actor.stop().await;
             self.inner.launcher.released(&handle);
+        }
+        {
+            let mut state = self.state();
+            for (session, address) in closing_addresses {
+                if let Some(team) = state.orchestrators.get_mut(&session) {
+                    team.chat.closing.remove(&address);
+                }
+            }
         }
         for view in views {
             (self.inner.on_change)(&view);
@@ -1122,8 +1231,13 @@ impl Delegation {
     /// One worker turn: submit, then read the stream until it settles.
     async fn turn(&self, job_id: &str, worker: &SessionActor, prompt: &str) -> TurnOutcome {
         let mut subscription = worker.subscribe();
+        // A job a chat message started: the transcript is told whose prompt
+        // this is before it is written.
+        if let Some(receipt) = self.chat_receipt(job_id) {
+            self.chat_event(chat::ChatEvent::Receiving { recipient: worker.handle().id.clone(), receipt });
+        }
         match worker.submit_text(format!("{job_id}-{}", now_unix_ms()), prompt).await {
-            Ok(SubmissionOutcome::Accepted) => {}
+            Ok(SubmissionOutcome::Accepted) => self.chat_accepted(job_id),
             Ok(SubmissionOutcome::Rejected { error }) | Ok(SubmissionOutcome::OutcomeUnknown { error }) | Err(error) => {
                 return TurnOutcome::Failed { error: format!("the worker did not take the task: {}", error.message), rate_limited: false, produced: false, transient: false };
             }
@@ -1219,7 +1333,9 @@ impl Delegation {
     /// means every unfinished job in the session.
     pub async fn await_jobs(&self, session: &str, ids: &[String], timeout: Duration, any: bool) -> Result<Vec<JobView>, String> {
         let ids: Vec<String> = if ids.is_empty() {
-            self.jobs(session).into_iter().filter(|job| !job.status.is_finished()).map(|job| job.id).collect()
+            // The jobs the orchestrator gave out: one a chat message started
+            // is not its to wait for.
+            self.jobs(session).into_iter().filter(|job| !job.status.is_finished() && !job.chat).map(|job| job.id).collect()
         } else {
             for id in ids {
                 self.job(session, id)?;
@@ -1278,7 +1394,7 @@ impl Delegation {
                 })
             })
             .collect();
-        let running = state.order.get(session).into_iter().flatten().filter(|id| state.jobs.get(*id).is_some_and(|record| !record.view.status.is_finished())).count();
+        let running = state.order.get(session).into_iter().flatten().filter(|id| state.jobs.get(*id).is_some_and(|record| !record.view.status.is_finished() && !record.view.chat)).count();
         Ok(serde_json::json!({
             "orchestrator": orchestrator.provider.as_str(),
             "workers": workers,
@@ -1466,7 +1582,7 @@ mod tests {
     #[test]
     fn a_pinned_job_routes_against_its_own_worker_alone() {
         let slot = |name: &str, provider| WorkerSlot { name: name.into(), provider, model: None, effort: None, capabilities: Vec::new(), note: None, prompt: None, resources: None };
-        let combo = Combo { workers: vec![slot("Reviewer A", Provider::Claude), slot("Reviewer B", Provider::Codex)], native_subagents: false };
+        let combo = Combo { workers: vec![slot("Reviewer A", Provider::Claude), slot("Reviewer B", Provider::Codex)], native_subagents: false, ..Default::default() };
         let pinned = DelegateArgs { task: "review".into(), worker: Some("Reviewer A".into()), pinned: true, ..DelegateArgs::default() };
         assert_eq!(team_for(&combo, &pinned, Provider::Claude).workers.iter().map(|w| w.name.as_str()).collect::<Vec<_>>(), ["Reviewer A"]);
         // With Claude spent, the router has nobody to move it to: it waits.
@@ -1481,7 +1597,7 @@ mod tests {
     #[test]
     fn a_local_lead_hires_only_local_helpers() {
         let slot = |name: &str, provider| WorkerSlot { name: name.into(), provider, model: None, effort: None, capabilities: Vec::new(), note: None, prompt: None, resources: None };
-        let combo = Combo { workers: vec![slot("Cloud", Provider::Claude), slot("Coder", Provider::Local)], native_subagents: false };
+        let combo = Combo { workers: vec![slot("Cloud", Provider::Claude), slot("Coder", Provider::Local)], native_subagents: false, ..Default::default() };
         let args = DelegateArgs { task: "edit".into(), ..DelegateArgs::default() };
         let team = team_for(&combo, &args, Provider::Local);
         assert_eq!(team.workers.iter().map(|w| w.name.as_str()).collect::<Vec<_>>(), ["Coder"]);
