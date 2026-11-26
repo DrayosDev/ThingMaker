@@ -103,6 +103,11 @@ impl std::fmt::Debug for BeforePrompt {
 pub struct SessionActorConfig {
     pub target: LaunchTarget,
     pub launch: AgentLaunch,
+    /// Account fixed by the host at attachment creation, not a live global setting.
+    pub account_id: Option<String>,
+    /// Whether the host handed this attachment a team to lead (its own
+    /// `team` server). The snapshot says so.
+    pub leads_team: bool,
     pub environment: EnvironmentProfile,
     pub client: ClientIdentity,
     pub timeouts: Timeouts,
@@ -137,6 +142,8 @@ impl SessionActorConfig {
         Self {
             target,
             launch,
+            account_id: None,
+            leads_team: false,
             environment: EnvironmentProfile::trusted_local(),
             client: ClientIdentity::default(),
             timeouts: Timeouts::default(),
@@ -277,6 +284,10 @@ pub struct Snapshot {
     /// Which provider this attachment runs on. The renderer reads it to know
     /// which account a turn is charged to and which transcript to look in.
     pub provider: Provider,
+    pub account_id: Option<String>,
+    /// Whether this attachment has the tools to lead a team. A session
+    /// without them cannot be given one while it runs.
+    pub leads_team: bool,
     pub web_available: bool,
     /// The agent's own id for the session, once `session/new` has answered.
     pub agent_session_id: Option<String>,
@@ -405,7 +416,16 @@ impl std::fmt::Debug for SessionActor {
 impl SessionActor {
     /// Launches the agent, negotiates ACP and attaches the session. Returns
     /// only after the attachment is ready or has failed with a typed error.
-    pub async fn open(config: SessionActorConfig) -> Result<SessionActor, DesktopError> {
+    pub async fn open(mut config: SessionActorConfig) -> Result<SessionActor, DesktopError> {
+        // A Gemini attachment handed session-local MCP servers has to be on
+        // native ACP: the stream-json bridge cannot forward them. The host
+        // hands one only to a Gemini session that leads a team; this keeps
+        // the transport and the servers from disagreeing.
+        if !config.mcp_servers.is_empty()
+            && let AgentLaunch::Gemini(options) = &mut config.launch
+        {
+            options.native_acp = true;
+        }
         let launch = config.launch.clone();
         let session_id = launch.session_id();
         let mut environment = config.environment.clone();
@@ -1421,6 +1441,12 @@ impl ActorState {
     async fn apply_session_config(&mut self) {
         let session_id = self.expected_session_id.clone();
         let timeout = self.config.timeouts.control;
+        let implicit_effort = match &self.launch {
+            AgentLaunch::Gemini(options) if options.native_acp => options.model.as_deref()
+                .and_then(|model| crate::agents::gemini::launch::native_model_selection(model, &self.offered_values("model")))
+                .and_then(|(_, effort)| effort),
+            _ => None,
+        };
         // The model is tried with a fallback because the preferred one can be
         // separately exhausted: Fable is billed against usage credits rather
         // than the subscription, so it runs out on its own schedule while the
@@ -1439,8 +1465,13 @@ impl ActorState {
             }
         }
         let mut wanted: Vec<(&'static str, String)> = Vec::new();
-        if let Some(effort) = self.launch.deferred_effort() {
-            wanted.push(("effort", effort.to_string()));
+        if let Some(effort) = self.launch.deferred_effort().map(str::to_string).or(implicit_effort) {
+            // Native Gemini advertises thought_level; other adapters use
+            // effort/reasoning_effort. Respect the returned protocol IDs.
+            let id = ["effort", "reasoning_effort", "thought_level"].into_iter()
+                .find(|id| self.config_options.as_array().is_some_and(|options| options.iter().any(|option| option["id"] == *id)))
+                .unwrap_or("effort");
+            wanted.push((id, effort));
         }
         wanted.push(("mode", self.launch.permission_mode_id().to_string()));
         for (id, value) in wanted {
@@ -1528,6 +1559,8 @@ impl ActorState {
         let offered = self.offered_values("model");
         match self.launch.provider() {
             Provider::Claude => claude::launch::offered_model(wanted, &offered).unwrap_or_else(|| wanted.to_string()),
+            Provider::Gemini if matches!(&self.launch, AgentLaunch::Gemini(options) if options.native_acp) =>
+                crate::agents::gemini::launch::native_model_selection(wanted, &offered).map(|(model, _)| model).unwrap_or_else(|| wanted.to_string()),
             _ => wanted.to_string(),
         }
     }
@@ -1579,13 +1612,18 @@ impl ActorState {
 
     /// Writes `session/prompt`. `reply` is the caller waiting on acceptance;
     /// the queue sends with none.
-    fn start_prompt(&mut self, session_id: String, request_id: String, blocks: Vec<Value>, reply: Option<Reply<SubmissionOutcome>>) {
+    fn start_prompt(&mut self, session_id: String, request_id: String, mut blocks: Vec<Value>, reply: Option<Reply<SubmissionOutcome>>) {
         self.flush_chunk();
         // The provider can emit tool updates before PromptWritten is handled.
         // Reset before dispatch so accepting the prompt cannot erase live tools.
         self.open_tools.clear();
         self.last_progress = Instant::now();
         self.submitted_prompts.insert(request_id.clone(), blocks.clone());
+        if let AgentLaunch::Gemini(options) = &self.launch
+            && let Some(guidance) = options.initial_prompt_prefix.as_deref()
+        {
+            blocks.insert(0, text_block(guidance));
+        }
         self.emit(SessionEvent::Submission {
             request_id: request_id.clone(),
             state: SubmissionState::Queued,
@@ -1741,6 +1779,30 @@ impl ActorState {
                         return true;
                     }
                 };
+                // A saved Gemini team may name a CLI model variant. Native
+                // ACP needs two options, applied in order off the actor loop.
+                if config_id == "model" && matches!(&self.launch, AgentLaunch::Gemini(options) if options.native_acp)
+                    && let Some((model, Some(level))) = value.as_str().and_then(|wanted|
+                        crate::agents::gemini::launch::native_model_selection(wanted, &self.offered_values("model")))
+                {
+                    let effort_id = ["thought_level", "effort", "reasoning_effort"].into_iter()
+                        .find(|id| !self.offered_values(id).is_empty()).unwrap_or("thought_level");
+                    if !self.offered_values(effort_id).contains(&level) {
+                        let _ = reply.send(Err(DesktopError::unsupported("This Gemini model does not offer the requested thinking level")));
+                        return true;
+                    }
+                    let transport = self.transport.clone();
+                    let internal = self.internal.clone();
+                    let timeout = self.config.timeouts.control;
+                    tokio::spawn(async move {
+                        let result = async {
+                            transport.request("session/set_config_option", json!({"sessionId":session_id,"configId":"model","value":model}), timeout).await?;
+                            transport.request("session/set_config_option", json!({"sessionId":session_id,"configId":effort_id,"value":level}), timeout).await
+                        }.await;
+                        let _ = internal.send(Internal::SetConfigResult { result, reply }).await;
+                    });
+                    return true;
+                }
                 let params = match errors::set_config_option_params(&session_id, &config_id, &value) {
                     Ok(params) => params,
                     Err(error) => {
@@ -1836,6 +1898,8 @@ impl ActorState {
 
     fn snapshot(&self) -> Snapshot {
         Snapshot {
+            account_id: self.config.account_id.clone(),
+            leads_team: self.config.leads_team,
             handle: self.handle.clone(),
             provider: self.launch.provider(),
             web_available: crate::integrations::member_resources::WEB_SUPPORTED && self.config.builtin_web,
@@ -1947,6 +2011,13 @@ impl ActorState {
                         .and_then(Value::as_str)
                         .map(str::to_string);
                     let agent_session_id = returned.unwrap_or_else(|| self.expected_session_id.clone());
+                    if self.launch.is_resume()
+                        && matches!(&self.launch, AgentLaunch::Gemini(options) if options.native_acp)
+                        && agent_session_id != self.expected_session_id
+                    {
+                        self.fail_bootstrap(DesktopError::not_ready("Antigravity did not load the requested conversation; reopen the original session")).await;
+                        return true;
+                    }
                     if agent_session_id != self.expected_session_id {
                         // On a new session the reservation was only a
                         // placeholder and the agent's own id is the expected
@@ -1983,6 +2054,10 @@ impl ActorState {
                 }
             },
             Internal::PromptWritten { request_id } => {
+                // Keep guidance available if dispatch failed before writing.
+                if let AgentLaunch::Gemini(options) = &mut self.launch {
+                    options.initial_prompt_prefix = None;
+                }
                 self.emit(SessionEvent::Submission {
                     request_id: request_id.clone(),
                     state: SubmissionState::Writing,

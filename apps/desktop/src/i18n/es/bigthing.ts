@@ -1,5 +1,8 @@
 /** Spanish for the bigthing strings, keyed by their English text. */
 export const bigthing: Record<string, string> = {
+  "Big Thing needs a session led by Claude Code, Codex or Local Models. Open one of those sessions to set a goal. Gemini can still lead ordinary teams.": "Big Thing necesita una sesión dirigida por Claude Code, Codex o Modelos locales. Abre una de esas sesiones para definir un objetivo. Gemini puede dirigir los equipos normales.",
+  "Choose a supported team": "Elige un equipo compatible",
+  "This team cannot lead a Big Thing run. Choose a supported team or this session's own team.": "Este equipo no puede dirigir una ejecución de Big Thing. Elige un equipo compatible o el equipo propio de esta sesión.",
   // BigThingTeam
   "The orchestrator delegates": "El orquestador delega",
   "Big Thing hands out the tasks": "Big Thing reparte las tareas",
@@ -573,6 +576,13 @@ export const bigthing: Record<string, string> = {
   "own subagents": "subagentes propios",
   "Who leads": "Quién dirige",
   "It may also start its own {provider} subagents": "También puede lanzar sus propios subagentes de {provider}",
+  "Agent chat": "Chat de agentes",
+  "Nobody": "Nadie",
+  "Cloud agents": "Agentes en la nube",
+  "Everyone": "Todos",
+  "Helpers only report to the lead.": "Los ayudantes solo informan a quien dirige.",
+  "Everyone on the team may message the others, local models too. A local model can then ask a cloud agent for something from the internet.": "Todos los del equipo pueden escribirse entre sí, también los modelos locales. Un modelo local puede entonces pedirle a un agente en la nube algo de internet.",
+  "Agents on cloud providers may message each other. Local models are left out, so they stay offline.": "Los agentes de proveedores en la nube pueden escribirse entre sí. Los modelos locales quedan fuera, así que siguen sin conexión.",
   "Helper name": "Nombre del ayudante",
   "Remove helper": "Quitar ayudante",
   "When to use this helper": "Cuándo usar este ayudante",

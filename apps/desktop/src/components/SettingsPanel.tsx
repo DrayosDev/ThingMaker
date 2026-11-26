@@ -23,6 +23,7 @@ import { useStore, basenameOf, type SettingsTab } from "../store";
 import { api } from "../ipc";
 import { redactText } from "../redact";
 import { chooseLanguage, languageChoice, t, type LanguageChoice } from "../i18n";
+import { ContinuitySettings } from "./ContinuitySettings";
 import { VoiceSettings } from "./VoiceSettings";
 import { PhoneSection } from "./PhoneSection";
 import { IntegrationsSettings } from "./IntegrationsPanel";
@@ -44,6 +45,7 @@ const TABS = (): { id: SettingsTab; label: string; desktopOnly?: boolean }[] => 
   { id: "integrations", label: t("Integrations"), desktopOnly: true },
   { id: "phone", label: t("Phone"), desktopOnly: true },
   { id: "data", label: t("Data"), desktopOnly: true },
+  { id: "continuity", label: t("Continuity"), desktopOnly: true },
 ];
 
 /**
@@ -103,7 +105,9 @@ export function SettingsPanel() {
         </nav>
       </div>
       <div className="settings-content" role="tabpanel">
-        {tab === "integrations" ? (
+        {tab === "continuity" ? (
+          <ContinuitySettings />
+        ) : tab === "integrations" ? (
           <IntegrationsSettings />
         ) : tab === "phone" ? (
           <PhoneSection />

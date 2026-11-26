@@ -34,7 +34,9 @@
 
 pub mod artifacts;
 pub mod attachments;
+pub mod documents;
 pub mod c2pa;
+pub mod continuity;
 pub mod delegation;
 pub mod error;
 pub mod ids;

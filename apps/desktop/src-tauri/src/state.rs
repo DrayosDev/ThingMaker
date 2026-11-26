@@ -81,6 +81,10 @@ pub struct AppState {
     pub ultra_review: std::sync::OnceLock<thingmaker_supervisor::ultrareview::UltraReviewService>,
     /// The model each live attachment was opened on, when one was asked for.
     pub actor_models: Mutex<HashMap<String, String>>,
+    /// The account each live attachment was pinned to, with its provider,
+    /// when the person chose one for the session rather than the provider's
+    /// active account.
+    pub pinned_accounts: Mutex<HashMap<String, (Provider, String)>>,
     /// Shared by sessions in the same tree; hooks own the cache's lifetime.
     pub review_caches: Mutex<HashMap<PathBuf, std::sync::Weak<Mutex<thingmaker_supervisor::review::BaselineCache>>>>,
     /// The update the last check found, kept so installing is the one the person saw.
@@ -114,6 +118,7 @@ impl AppState {
             engine: std::sync::OnceLock::new(),
             ultra_review: std::sync::OnceLock::new(),
             actor_models: Mutex::new(HashMap::new()),
+            pinned_accounts: Mutex::new(HashMap::new()),
         })
     }
 
@@ -178,9 +183,21 @@ impl AppState {
         self.actor_models.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(id).cloned()
     }
 
+    /// Remembers the account an attachment was pinned to.
+    pub fn set_pinned_account(&self, id: &str, provider: Provider, account: &str) {
+        self.pinned_accounts.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(id.to_string(), (provider, account.to_string()));
+    }
+
+    /// The account a live attachment is pinned to, and the provider it is
+    /// an account of; `None` for one that follows the active account.
+    pub fn pinned_account(&self, id: &str) -> Option<(Provider, String)> {
+        self.pinned_accounts.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(id).cloned()
+    }
+
     pub fn remove_actor(&self, id: &str) -> Option<SessionActor> {
         self.web_sessions.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
         self.actor_models.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(id);
+        self.pinned_accounts.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(id);
         self.actor_roots
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -223,6 +240,17 @@ impl AppState {
 
     pub fn auth_runs_arc(&self) -> Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>> {
         Arc::clone(&self.auth_runs)
+    }
+
+    /// Whether a live attachment is already on this conversation, by its
+    /// handle or by the id its agent keeps it under. A second process on it
+    /// would write the same transcript.
+    pub fn conversation_attached(&self, agent_session_id: &str) -> bool {
+        self.agent_session_ids
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .any(|(handle, agent)| handle == agent_session_id || agent == agent_session_id)
     }
 
     pub fn actor_ids(&self) -> Vec<String> {
@@ -323,18 +351,27 @@ impl AppState {
         id.filter(|id| self.accounts().iter().any(|account| account.provider == provider && &account.id == id)).unwrap_or_else(|| accounts::DEFAULT_ACCOUNT.to_string())
     }
 
+    /// Resolve once before launching, so later global account changes cannot
+    /// redirect a session. Explicit invalid accounts never select the default.
+    pub fn session_account_id(&self, provider: Provider, requested: Option<&str>) -> Result<String, DesktopError> {
+        use thingmaker_supervisor::agents::accounts;
+        let id = requested.map(str::to_string).unwrap_or_else(|| self.active_account(provider));
+        if id == accounts::DEFAULT_ACCOUNT { return Ok(id); }
+        if !accounts::valid_id(&id) { return Err(DesktopError::unsupported("invalid account id")); }
+        if !accounts::supports_accounts(provider) || !self.accounts().iter().any(|account| account.provider == provider && account.id == id) {
+            return Err(DesktopError::not_ready("that account does not belong to this provider or is gone"));
+        }
+        Ok(id)
+    }
+
     /// The settings folder of account `id` (the active one when `None`),
     /// shared with the person's main folder again before it is used. `None`
     /// for the default account, which is the person's own folder.
     pub fn try_account_folder(&self, provider: Provider, id: Option<&str>) -> Result<Option<PathBuf>, DesktopError> {
         use thingmaker_supervisor::agents::accounts;
-        let id = id.map(str::to_string).unwrap_or_else(|| self.active_account(provider));
-        if id == accounts::DEFAULT_ACCOUNT || !accounts::supports_accounts(provider) {
+        let id = self.session_account_id(provider, id)?;
+        if id == accounts::DEFAULT_ACCOUNT {
             return Ok(None);
-        }
-        if !accounts::valid_id(&id) { return Err(DesktopError::unsupported("invalid account id")); }
-        if !self.accounts().iter().any(|account| account.provider == provider && account.id == id) {
-            return Err(DesktopError::not_ready("that account is gone"));
         }
         let home = self.home.clone().ok_or_else(|| DesktopError::not_ready("home directory unavailable"))?;
         let folder = accounts::account_folder(&self.data_dir, provider, &id);
@@ -428,6 +465,20 @@ mod account_tests {
             std::fs::write(folder, "not a directory").unwrap();
             assert!(state.try_account_folder(provider, Some("work")).is_err());
         }
+    }
+
+    #[test]
+    fn a_conversation_is_attached_under_its_handle_or_the_agents_own_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::initialize(dir.path(), None).unwrap();
+        assert!(!state.conversation_attached("agent-1"));
+        // A worker a delegation opened: a reserved handle, the agent's id apart.
+        state.agent_session_ids.lock().unwrap().insert("reserved-handle".into(), "agent-1".into());
+        assert!(state.conversation_attached("agent-1"), "resuming it would start a second process");
+        assert!(state.conversation_attached("reserved-handle"));
+        assert!(!state.conversation_attached("agent-2"));
+        state.remove_actor("reserved-handle");
+        assert!(!state.conversation_attached("agent-1"), "closed: free to reopen");
     }
 
     #[test]

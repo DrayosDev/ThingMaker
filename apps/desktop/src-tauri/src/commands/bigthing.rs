@@ -80,7 +80,7 @@ impl EngineHost for HostEngine {
                 Some(session_id) => super::session::OpenRequestMode::Resume { session_id },
                 None => super::session::OpenRequestMode::New,
             };
-            let request = super::session::OpenRequest { workspace_id: spec.workspace_id, mode, fork_source: None, provider: Some(spec.provider), model: spec.model, resources: spec.resources, reasoning_effort: spec.effort, combo: spec.combo, side_of: None, fork_at: None };
+            let request = super::session::OpenRequest { workspace_id: spec.workspace_id, mode, fork_source: None, provider: Some(spec.provider), account_id: None, model: spec.model, resources: spec.resources, reasoning_effort: spec.effort, combo: spec.combo, side_of: None, fork_at: None };
             let opened = super::session::session_open(request, app.state::<AppState>()).await?;
             host.live_by(&opened.handle.id).ok_or_else(|| DesktopError::not_ready("the session opened but is not attached"))
         })
@@ -92,7 +92,7 @@ impl EngineHost for HostEngine {
             if provider == Provider::Gemini {
                 return None;
             }
-            super::providers::provider_quota(provider, app.state::<AppState>()).await.ok()
+            super::providers::provider_quota(provider, app.state::<AppState>()).await.ok().flatten()
         })
     }
 

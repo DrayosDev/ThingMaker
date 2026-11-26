@@ -207,6 +207,14 @@ impl Engine {
         })
     }
 
+    pub(crate) fn validate_goal_leader(&self, goal: &OdysseyRecord) -> Result<(), DesktopError> {
+        let provider = match goal.session_id.as_deref() {
+            Some(id) => self.db(|storage| storage.session_get(id))?.map(|record| record.provider),
+            None => None,
+        };
+        validate_goal_leadership(provider, goal.team.as_ref())
+    }
+
     /// Goals that are running, or parked until an account's limit resets:
     /// the ones that expect to keep working while nobody watches.
     pub fn live_goal_count(&self) -> usize {
@@ -752,7 +760,7 @@ impl Engine {
         // Another account may have room while this one is still spent.
         let idle = live.as_ref().and_then(|live| self.watch(&live.handle)).is_none_or(|watch| watch.idle());
         let candidates = self.inner.host.usable_providers();
-        for other in candidates.iter().copied().filter(|other| *other != provider && other.can_orchestrate()) {
+        for other in candidates.iter().copied().filter(|other| *other != provider && other.can_lead_goal()) {
             if should_resample(self.usage_for(other).as_ref(), None, now) {
                 self.refresh_usage(other).await;
             }
@@ -821,7 +829,7 @@ impl Engine {
     }
 
     pub(crate) fn tools_available(&self, live: &LiveSession) -> bool {
-        live.provider.can_orchestrate() && self.inner.delegation.as_ref().is_some_and(|delegation| delegation.orchestrator_of(&live.handle).is_some())
+        live.provider.can_lead_goal() && self.inner.delegation.as_ref().is_some_and(|delegation| delegation.orchestrator_of(&live.handle).is_some())
     }
 
     fn team_combo(&self, live: &LiveSession) -> Option<Combo> {
@@ -1450,6 +1458,12 @@ impl Engine {
         let lock = self.goal_lock(goal_id);
         let mut state = lock.lock().await;
         let loaded = self.load(goal_id)?;
+        self.validate_goal_leader(&loaded.goal)?;
+        if let Some(live) = self.live_for(&loaded.goal, false).await
+            && !live.provider.can_lead_goal()
+        {
+            return Err(DesktopError::unsupported("Gemini can lead ordinary teams, but cannot start a Big Thing run"));
+        }
         // A run with its own worktree gets it before anything is sent.
         if loaded.goal.state == OdysseyState::Draft && loaded.goal.isolate && loaded.goal.worktree_path.is_none() {
             self.isolate(&mut state, &loaded).await?;
@@ -1508,6 +1522,13 @@ impl Engine {
     pub(crate) async fn perform_move(&self, state: &mut GoalState, goal_id: &str, target: MoveTarget, reason: Option<String>) -> Result<(), DesktopError> {
         let loaded = self.load(goal_id)?;
         let goal = loaded.goal.clone();
+        // Reject unsupported destinations before cancelling any current work.
+        let target_provider = match &target {
+            MoveTarget::New { provider } => *provider,
+            MoveTarget::Session { handle } => self.inner.host.live_handle(handle)
+                .ok_or_else(|| DesktopError::not_ready("that session is not attached any more"))?.provider,
+        };
+        validate_goal_leadership(Some(target_provider), None)?;
         let current = self.live_for(&goal, false).await;
         // A turn owns the working tree: it is cancelled before anything moves,
         // so two orchestrators never edit it at once.
@@ -1520,7 +1541,7 @@ impl Engine {
         let target_live = match target {
             MoveTarget::Session { handle } => self.inner.host.live_handle(&handle).ok_or_else(|| DesktopError::not_ready("that session is not attached any more"))?,
             MoveTarget::New { provider } => {
-                if !provider.can_orchestrate() && reason.is_some() {
+                if !provider.can_lead_goal() {
                     return Err(DesktopError::unsupported(format!("{} cannot lead a run", provider.label())));
                 }
                 // Moving onto an account that cannot answer at all is how a
@@ -1537,6 +1558,9 @@ impl Engine {
                 live
             }
         };
+        if !target_live.provider.can_lead_goal() {
+            return Err(DesktopError::unsupported("Gemini can lead ordinary teams, but cannot lead a Big Thing run"));
+        }
         let row = self.db(|storage| storage.odyssey_session_row(&goal.workspace_id, &target_live.agent_session_id, Some(target_live.provider)))?.ok_or_else(|| DesktopError::not_ready("that session has no desktop record"))?;
         self.db(|storage| storage.odyssey_repoint(goal_id, &row))?;
         match &reason {
@@ -1808,10 +1832,47 @@ pub struct TeamLead {
     pub effort: Option<String>,
 }
 
+/// Big Thing's policies have a narrower provider set than ordinary teams.
+/// Validate before saving a goal or creating any run resources.
+pub fn validate_goal_leadership(provider: Option<Provider>, team: Option<&serde_json::Value>) -> Result<(), DesktopError> {
+    let lead = team.and_then(|value| value.get("orchestrator")).and_then(|value| value.get("provider"));
+    let selected = match lead {
+        Some(value) if !value.is_null() => Some(value.as_str().and_then(Provider::parse)
+            .ok_or_else(|| DesktopError::unsupported("invalid Big Thing team leader"))?),
+        _ => None,
+    };
+    if provider.into_iter().chain(selected).any(|provider| !provider.can_lead_goal()) {
+        return Err(DesktopError::unsupported("Gemini can lead ordinary teams, but cannot lead a Big Thing run"));
+    }
+    Ok(())
+}
+
 /// A goal's own team: `{orchestrator, combo}`.
 pub fn team_of(goal: &OdysseyRecord) -> Option<(TeamLead, Combo)> {
     let team = goal.team.as_ref()?;
     let lead: TeamLead = team.get("orchestrator").cloned().and_then(|value| serde_json::from_value(value).ok()).unwrap_or_default();
     let combo: Combo = team.get("combo").cloned().and_then(|value| serde_json::from_value(value).ok()).unwrap_or_default();
     Some((lead, combo.normalized()))
+}
+
+#[cfg(test)]
+mod goal_leadership_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn gemini_helpers_remain_available_to_supported_goal_leaders() {
+        let team = json!({"orchestrator":{"provider":"codex"},"combo":{"workers":[{"provider":"gemini","name":"helper"}]}});
+        assert!(validate_goal_leadership(Some(Provider::Codex), Some(&team)).is_ok());
+        assert!(validate_goal_leadership(Some(Provider::Gemini), Some(&team)).is_err());
+    }
+
+    #[test]
+    fn unsupported_or_malformed_preset_leadership_is_rejected() {
+        for provider in ["gemini", "unknown"] {
+            let team = json!({"orchestrator":{"provider":provider}});
+            assert!(validate_goal_leadership(Some(Provider::Claude), Some(&team)).is_err());
+        }
+        assert!(validate_goal_leadership(None, None).is_ok());
+    }
 }

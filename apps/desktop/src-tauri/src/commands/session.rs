@@ -26,7 +26,7 @@ use thingmaker_supervisor::{
     security::EnvironmentProfile,
     storage::{
         Storage, content_hash,
-        workspaces::{ArchiveState, SessionOrigin, SessionRecord, TrustState, WorkspaceRecord},
+        workspaces::{ArchiveState, SESSION_ACCOUNT, SessionOrigin, SessionRecord, TrustState, WorkspaceRecord},
     },
     supervisor::{
         AgentLaunch, EnqueueOutcome, EventEnvelope, QueueOp, QueueReply, QueuedPrompt, SessionActor, SessionActorConfig,
@@ -65,6 +65,12 @@ pub struct OpenRequest {
     /// its transcript was written by that provider.
     #[serde(default)]
     pub provider: Option<Provider>,
+    /// The account to pin this session to, independently of the provider's
+    /// active one. It is kept with the session: a later resume without one
+    /// runs on it again. Desktop only; the phone's requests have it removed
+    /// (`remote::dispatch`).
+    #[serde(default)]
+    pub account_id: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -166,9 +172,8 @@ fn bring_transcript(state: &AppState, provider: Provider, record: &WorkspaceReco
     copied
 }
 
-/// A provider's launch for a session in `record`, used for the user's
-/// sessions and for workers alike: the program found, the workspace's trust
-/// as the permission stance, and the model and effort as given.
+/// [`build_launch_for_account`] on the provider's active account.
+#[cfg(test)]
 pub(crate) fn build_launch(
     state: &AppState,
     record: &WorkspaceRecord,
@@ -178,6 +183,29 @@ pub(crate) fn build_launch(
     resume: Option<String>,
     reserved: SessionId,
 ) -> CommandResult<(LaunchTarget, AgentLaunch)> {
+    let account_id = state.session_account_id(provider, None)?;
+    build_launch_for_account(state, record, provider, model, effort, resume, reserved, &account_id)
+}
+
+/// A provider's launch for a session in `record` on the account named, used
+/// for the user's sessions and for workers alike: the program found, the
+/// workspace's trust as the permission stance, and the model and effort as
+/// given. The account is the provider's active one, or the one a session
+/// (or a worker's leader) is pinned to.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_launch_for_account(
+    state: &AppState,
+    record: &WorkspaceRecord,
+    provider: Provider,
+    model: Option<String>,
+    effort: Option<String>,
+    resume: Option<String>,
+    reserved: SessionId,
+    account_id: &str,
+) -> CommandResult<(LaunchTarget, AgentLaunch)> {
+    // Resolve the pinned account before provider discovery; invalid selection
+    // must never fall back to another provider account or its credentials.
+    let account_folder = state.try_account_folder(provider, Some(account_id))?;
     let root = Path::new(&record.canonical_root);
     let resolved = state.resolve_provider(provider)?;
     Ok(match provider {
@@ -192,7 +220,7 @@ pub(crate) fn build_launch(
             options.permission_mode = permission_for(record);
             options.resume = resume;
             // The active account; its folder shares everything but the sign-in.
-            options.config_dir = state.try_account_folder(Provider::Claude, None)?;
+            options.config_dir = account_folder;
             (LaunchTarget::executable(resolved.program), AgentLaunch::Claude(options))
         }
         Provider::Codex => {
@@ -202,12 +230,12 @@ pub(crate) fn build_launch(
             options.effort = effort;
             options.permission_mode = permission_for(record);
             options.resume = resume;
-            options.codex_home = state.try_account_folder(Provider::Codex, None)?;
+            options.codex_home = account_folder;
             (LaunchTarget::executable(resolved.program), AgentLaunch::Codex(options))
         }
         Provider::Gemini => {
             let mut options = GeminiLaunchOptions::new(root, resolved.program.clone());
-            options.account_home = state.try_account_folder(Provider::Gemini, None)?;
+            options.account_home = account_folder;
             if let Some(folder) = options.account_home.as_deref() {
                 thingmaker_supervisor::agents::gemini::launch::require_isolated_token(folder).map_err(DesktopError::unsupported)?;
             }
@@ -358,6 +386,40 @@ fn source_record(storage: &Storage, workspace: &str, mode: &OpenRequestMode, sou
     }
 }
 
+/// The account a session about to open is pinned to, if any.
+///
+/// One asked for is checked and refused when it is not an account of this
+/// provider: nothing falls back to another identity. Asking for the active
+/// account is not a pin: the session goes on following it, which is what
+/// moving a session to the account just made active means. One kept from
+/// before (`recorded` is the session being reopened, or the one being
+/// copied) is used while the account still exists; once it has been removed
+/// the session follows the active account again, since its history is shared.
+fn pinned_account(state: &AppState, provider: Provider, requested: Option<&str>, recorded: Option<&SessionRecord>) -> CommandResult<Option<String>> {
+    if let Some(requested) = requested {
+        let account = state.session_account_id(provider, Some(requested))?;
+        return Ok(Some(account).filter(|account| *account != state.active_account(provider)));
+    }
+    let Some(row) = recorded else { return Ok(None) };
+    let kept = state.with_storage(|s| s.setting_get::<String>(SESSION_ACCOUNT, &row.id)).map_err(storage_error)?;
+    Ok(kept.and_then(|account| state.session_account_id(provider, Some(&account)).ok()))
+}
+
+/// Keeps what [`pinned_account`] decided with the session's row, and with
+/// its live attachment for its workers to follow. The pin is the session's,
+/// not the attachment's: it has to be there when the session is reopened,
+/// after a restart too. A session that is not pinned (any more) has none.
+fn keep_pin(state: &AppState, row_id: &str, handle: &str, provider: Provider, pinned: Option<&str>) -> CommandResult<()> {
+    match pinned {
+        Some(account) => {
+            state.with_storage(|s| s.setting_set(SESSION_ACCOUNT, row_id, &account)).map_err(storage_error)?;
+            state.set_pinned_account(handle, provider, account);
+        }
+        None => state.with_storage(|s| s.setting_delete(SESSION_ACCOUNT, row_id)).map_err(storage_error)?,
+    }
+    Ok(())
+}
+
 fn restore_setup(storage: &Storage, recorded: Option<&SessionRecord>, model: Option<String>, requested: Option<ResourceSelection>) -> CommandResult<(Option<String>, Option<ResourceSelection>)> {
     let Some(row) = recorded else { return Ok((model, requested)); };
     if row.provider == Provider::Local && let Some(saved) = storage.setting_get::<LocalSessionSetup>("localSessionSetup", &row.id).map_err(storage_error)? {
@@ -382,7 +444,7 @@ pub async fn session_open(request: OpenRequest, state: State<'_, AppState>) -> C
     // By the handle, and by the agent's own id: a worker opened by a
     // delegation is addressed by a reserved handle, and resuming its id would
     // start a second process on a session the first one is still writing.
-    let running_elsewhere = matches!(&request.mode, OpenRequestMode::Resume { session_id } if state.actor_ids().iter().any(|id| state.agent_session_id(id) == *session_id));
+    let running_elsewhere = matches!(&request.mode, OpenRequestMode::Resume { session_id } if state.conversation_attached(session_id));
     if state.actor(session_id.as_str()).is_some() || running_elsewhere {
         return Err(DesktopError::conflict(
             "This session is already attached in this application. Use the existing attachment instead of starting a second agent process.",
@@ -390,6 +452,13 @@ pub async fn session_open(request: OpenRequest, state: State<'_, AppState>) -> C
     }
     let recorded = state.with_storage(|s| source_record(s, &record.id, &request.mode, request.fork_source.as_ref()))?;
     let provider = recorded.as_ref().map(|row| row.provider).or(request.provider).unwrap_or_default();
+    // The account asked for, else the one this session (or the one it is
+    // copied from) was pinned to, else the provider's active account.
+    let pinned = pinned_account(&state, provider, request.account_id.as_deref(), recorded.as_ref())?;
+    let account_id = match &pinned {
+        Some(account) => account.clone(),
+        None => state.session_account_id(provider, None)?,
+    };
     // A session that never got a prompt has no transcript, so its provider
     // has nothing to resume and would answer "resource not found". Its row
     // is a tombstone: hidden, and said so plainly.
@@ -439,7 +508,7 @@ pub async fn session_open(request: OpenRequest, state: State<'_, AppState>) -> C
     let (model, selection) = state.with_storage(|s| restore_setup(s, recorded.as_ref(), model, request.resources.clone()))?;
     let resolved = super::member_resources::resolve_for(&state, Path::new(&record.canonical_root), provider, model.as_deref(), selection.as_ref())?;
     let opened_model = model.clone();
-    let (target, mut launch) = build_launch(&state, &record, provider, model, effort, resume, session_id.clone())?;
+    let (target, mut launch) = build_launch_for_account(&state, &record, provider, model, effort, resume, session_id.clone(), &account_id)?;
     // A newly initialized CLI may already have a private history when the main
     // account creates its own. Resume with the chosen account only if it can read this conversation.
     if let AgentLaunch::Gemini(options) = &launch
@@ -452,6 +521,7 @@ pub async fn session_open(request: OpenRequest, state: State<'_, AppState>) -> C
     let generation = 1;
     let program = program_of(&target, &launch);
     let mut config = SessionActorConfig::new(target, launch.clone());
+    config.account_id = Some(account_id);
     config.environment = launch_environment(&state).with_program_dir(&program);
     config.attachment_generation = generation;
     if let OpenRequestMode::Fork { session_id } = &request.mode {
@@ -465,7 +535,11 @@ pub async fn session_open(request: OpenRequest, state: State<'_, AppState>) -> C
     // A fork starts with its main session's team: it has the same tools.
     let row_before = recorded.as_ref().map(|row| row.id.as_str());
     let combo = super::delegation::starting_combo(&state, request.combo.clone(), row_before);
-    super::delegation::prepare_orchestrator(&state, session_id.as_str(), PathBuf::from(&record.canonical_root), &combo, &mut launch, &mut config);
+    // A Gemini conversation keeps the transport it began on: only one that
+    // started with a team to lead runs on native `agy acp`.
+    let resumed_row = row_before.filter(|_| matches!(request.mode, OpenRequestMode::Resume { .. }));
+    let gemini_native = provider == Provider::Gemini && super::delegation::gemini_native(&state, resumed_row, &combo);
+    super::delegation::prepare_orchestrator(&state, session_id.as_str(), PathBuf::from(&record.canonical_root), &combo, &mut launch, &mut config, gemini_native);
     if let Some(resources) = resolved {
         config.builtin_web = resources.builtin_web;
         match thingmaker_supervisor::integrations::member_resources::apply_to_launch(resources, &mut launch) {
@@ -512,6 +586,10 @@ pub async fn session_open(request: OpenRequest, state: State<'_, AppState>) -> C
     if let Some(setup) = &local_setup {
         state.with_storage(|s| s.setting_set("localSessionSetup", &desktop_session.id, setup)).map_err(storage_error)?;
     }
+    if gemini_native {
+        state.with_storage(|s| s.setting_set(super::delegation::GEMINI_NATIVE_KEY, &desktop_session.id, &true)).map_err(storage_error)?;
+    }
+    keep_pin(&state, &desktop_session.id, &handle.id, provider, pinned.as_deref())?;
     // A fork is listed under the session it was copied from.
     if request.side_of.is_none()
         && matches!(request.mode, OpenRequestMode::Fork { .. })
@@ -645,6 +723,7 @@ pub async fn session_submit(request: SubmitRequest, state: State<'_, AppState>) 
         return Err(DesktopError::io("invalid request id"));
     }
     let actor = actor_for(&state, &request.handle)?;
+    super::delegation::note_person(&state, &request.handle.id);
     let root = state
         .actor_entries()
         .into_iter()
@@ -741,6 +820,9 @@ async fn prompt_blocks(
         blocks.push(json!({ "type": "text", "text": text }));
     }
     if !attachment_ids.is_empty() {
+        if attachment_ids.len() > thingmaker_supervisor::attachments::MAX_ATTACHMENTS {
+            return Err(DesktopError::limit_exceeded("at most 8 attachments per prompt"));
+        }
         let capabilities = actor.snapshot().await?.capabilities;
         let (prompt_image, prompt_audio) = capabilities
             .as_ref()
@@ -748,14 +830,16 @@ async fn prompt_blocks(
             .unwrap_or((false, false));
         let store = thingmaker_supervisor::attachments::AttachmentStore::new(&state.data_dir);
         let mut snapshots = Vec::new();
-        let mut media = Vec::new();
+        let mut contents = Vec::new();
         for id in attachment_ids {
             let (snapshot, bytes) = store.load(id)?;
-            media.push(thingmaker_supervisor::attachments::media_block(&snapshot, &bytes, prompt_image, prompt_audio)?);
+            contents.push(bytes);
             snapshots.push(snapshot);
         }
         thingmaker_supervisor::attachments::check_envelope(&snapshots)?;
-        blocks.extend(media);
+        for (snapshot, bytes) in snapshots.iter().zip(&contents) {
+            blocks.push(thingmaker_supervisor::attachments::media_block(snapshot, bytes, prompt_image, prompt_audio)?);
+        }
     }
     Ok(blocks)
 }
@@ -794,6 +878,7 @@ pub async fn session_enqueue(request: EnqueueRequest, state: State<'_, AppState>
         return Err(DesktopError::io("the queued prompt's composer state is too large"));
     }
     let actor = actor_for(&state, &request.handle)?;
+    super::delegation::note_person(&state, &request.handle.id);
     let root = state
         .actor_entries()
         .into_iter()
@@ -836,6 +921,7 @@ pub async fn session_steer(request: SteerRequest, state: State<'_, AppState>) ->
         return Err(DesktopError::io("steer text is empty"));
     }
     let actor = actor_for(&state, &request.handle)?;
+    super::delegation::note_person(&state, &request.handle.id);
     actor.steer_text(&request.text).await
 }
 
@@ -1242,6 +1328,116 @@ pub fn session_token_usage(request: TokenUsageRequest, state: State<'_, AppState
 #[cfg(test)]
 mod recovery_tests {
     use super::*;
+
+    #[test]
+    fn explicit_session_account_routes_profile_without_changing_active_account() {
+        use thingmaker_supervisor::{agents::accounts, storage::settings::GLOBAL_SCOPE};
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = AppState::initialize(&temp.path().join("data"), None).unwrap();
+        state.home = Some(temp.path().join("home"));
+        let accounts = ["work", "personal"].map(|id| accounts::Account { id: id.into(), provider: Provider::Gemini, label: id.into() });
+        state.with_storage(|s| s.setting_set(accounts::ACCOUNTS_SETTING, GLOBAL_SCOPE, &accounts)).unwrap();
+        state.with_storage(|s| s.setting_set(accounts::ACTIVE_ACCOUNT_SETTING, "gemini", &"personal")).unwrap();
+        // Build only: the fake executable and private tokens are never used.
+        let location = crate::state::ProviderLocation { program: temp.path().join("unused-agy"), script: None };
+        state.with_storage(|s| s.setting_set(crate::state::PROVIDER_LOCATION_KEY, "provider:gemini", &location)).unwrap();
+        for id in ["work", "personal"] {
+            let home = state.try_account_folder(Provider::Gemini, Some(id)).unwrap().unwrap();
+            std::fs::write(thingmaker_supervisor::agents::gemini::launch::token_path(&home), "test-only-token").unwrap();
+        }
+        let record = state.with_storage(|s| s.workspace_upsert("/project", "/project", "project")).unwrap();
+        let (_, launch) = build_launch_for_account(&state, &record, Provider::Gemini, None, None, None, SessionId::reserve(), "work").unwrap();
+        let AgentLaunch::Gemini(options) = launch else { panic!("wrong provider") };
+        assert_eq!(options.account_home, Some(accounts::account_folder(&state.data_dir, Provider::Gemini, "work")));
+        assert_eq!(state.active_account(Provider::Gemini), "personal");
+
+        let pinned = state.session_account_id(Provider::Gemini, None).unwrap();
+        state.with_storage(|s| s.setting_set(accounts::ACTIVE_ACCOUNT_SETTING, "gemini", &"default")).unwrap();
+        let (_, launch) = build_launch_for_account(&state, &record, Provider::Gemini, None, None, None, SessionId::reserve(), &pinned).unwrap();
+        let AgentLaunch::Gemini(options) = launch else { panic!("wrong provider") };
+        assert_eq!(options.account_home, Some(accounts::account_folder(&state.data_dir, Provider::Gemini, "personal")));
+        assert_eq!(state.active_account(Provider::Gemini), "default");
+        let (_, launch) = build_launch(&state, &record, Provider::Gemini, None, None, None, SessionId::reserve()).unwrap();
+        let AgentLaunch::Gemini(options) = launch else { panic!("wrong provider") };
+        assert!(options.account_home.is_none());
+    }
+
+    #[test]
+    fn a_pinned_account_is_kept_with_the_session_and_used_again_after_a_restart() {
+        use thingmaker_supervisor::{agents::accounts, storage::settings::GLOBAL_SCOPE};
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("data");
+        let open = || {
+            let mut state = AppState::initialize(&data, None).unwrap();
+            state.home = Some(temp.path().join("home"));
+            state
+        };
+        let state = open();
+        let list = ["work", "spare"].map(|id| accounts::Account { id: id.into(), provider: Provider::Codex, label: id.into() });
+        state.with_storage(|s| s.setting_set(accounts::ACCOUNTS_SETTING, GLOBAL_SCOPE, &list)).unwrap();
+        let location = crate::state::ProviderLocation { program: temp.path().join("unused-codex"), script: None };
+        state.with_storage(|s| s.setting_set(crate::state::PROVIDER_LOCATION_KEY, "provider:codex", &location)).unwrap();
+        let record = state.with_storage(|s| s.workspace_upsert("/project", "/project", "project")).unwrap();
+        let row = state.with_storage(|s| s.session_upsert(&record.id, "thread", SessionOrigin::Desktop, Provider::Codex)).unwrap();
+        let other = state.with_storage(|s| s.session_upsert(&record.id, "unpinned", SessionOrigin::Desktop, Provider::Codex)).unwrap();
+
+        // Opened on an account the person chose, while "default" stays active.
+        let pinned = pinned_account(&state, Provider::Codex, Some("work"), None).unwrap();
+        assert_eq!(pinned.as_deref(), Some("work"));
+        keep_pin(&state, &row.id, "handle", Provider::Codex, pinned.as_deref()).unwrap();
+        assert_eq!(state.pinned_account("handle"), Some((Provider::Codex, "work".into())));
+        assert_eq!(state.active_account(Provider::Codex), "default");
+        state.remove_actor("handle");
+        assert!(state.pinned_account("handle").is_none());
+        drop(state);
+
+        // The application restarts; the session is reopened with no account named.
+        let state = open();
+        let pinned = pinned_account(&state, Provider::Codex, None, Some(&row)).unwrap();
+        assert_eq!(pinned.as_deref(), Some("work"));
+        let (_, launch) = build_launch_for_account(&state, &record, Provider::Codex, None, None, Some("thread".into()), SessionId::reserve(), pinned.as_deref().unwrap()).unwrap();
+        let AgentLaunch::Codex(options) = launch else { panic!("wrong provider") };
+        assert_eq!(options.codex_home, Some(accounts::account_folder(&state.data_dir, Provider::Codex, "work")));
+        // A session nobody pinned follows the active account, as before.
+        assert!(pinned_account(&state, Provider::Codex, None, Some(&other)).unwrap().is_none());
+        // Moving it to another account by hand pins it there instead.
+        let moved = pinned_account(&state, Provider::Codex, Some("spare"), Some(&row)).unwrap();
+        keep_pin(&state, &row.id, "handle", Provider::Codex, moved.as_deref()).unwrap();
+        assert_eq!(pinned_account(&state, Provider::Codex, None, Some(&row)).unwrap().as_deref(), Some("spare"));
+        // Moving it to the active account is no pin at all: it follows that one again.
+        let followed = pinned_account(&state, Provider::Codex, Some("default"), Some(&row)).unwrap();
+        assert!(followed.is_none());
+        keep_pin(&state, &row.id, "handle", Provider::Codex, followed.as_deref()).unwrap();
+        assert!(pinned_account(&state, Provider::Codex, None, Some(&row)).unwrap().is_none());
+        keep_pin(&state, &row.id, "handle", Provider::Codex, Some("spare")).unwrap();
+        // An account named but not this provider's is refused, not replaced.
+        assert!(pinned_account(&state, Provider::Codex, Some("missing"), Some(&row)).is_err());
+
+        // Once the pinned account is removed the session follows the active
+        // one again, and the stale pin is forgotten on that opening.
+        state.with_storage(|s| s.setting_set(accounts::ACCOUNTS_SETTING, GLOBAL_SCOPE, &list[..1].to_vec())).unwrap();
+        let pinned = pinned_account(&state, Provider::Codex, None, Some(&row)).unwrap();
+        assert!(pinned.is_none());
+        keep_pin(&state, &row.id, "handle", Provider::Codex, pinned.as_deref()).unwrap();
+        assert!(state.with_storage(|s| s.setting_get::<String>(SESSION_ACCOUNT, &row.id)).unwrap().is_none());
+    }
+
+    #[test]
+    fn explicit_session_account_rejects_invalid_removed_and_wrong_provider_ids() {
+        use thingmaker_supervisor::{agents::accounts, storage::settings::GLOBAL_SCOPE};
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::initialize(temp.path(), None).unwrap();
+        let account = accounts::Account { id: "codex-only".into(), provider: Provider::Codex, label: "Codex".into() };
+        state.with_storage(|s| s.setting_set(accounts::ACCOUNTS_SETTING, GLOBAL_SCOPE, &[account])).unwrap();
+        let record = state.with_storage(|s| s.workspace_upsert("/project", "/project", "project")).unwrap();
+        for id in ["", "../default", "removed", "codex-only"] {
+            assert!(build_launch_for_account(&state, &record, Provider::Gemini, None, None, None, SessionId::reserve(), id).is_err());
+            assert_eq!(state.active_account(Provider::Gemini), "default");
+        }
+        assert!(state.try_account_folder(Provider::Local, Some("codex-only")).is_err());
+        let request: OpenRequest = serde_json::from_value(json!({"workspaceId":"w", "mode":{"mode":"new"}, "accountId":"codex-only"})).unwrap();
+        assert_eq!(request.account_id.as_deref(), Some("codex-only"));
+    }
 
     #[tokio::test]
     #[ignore = "requires a Mac, Codex CLI and an installed tool-capable THINGMAKER_LOCAL_TEST_MODEL"]

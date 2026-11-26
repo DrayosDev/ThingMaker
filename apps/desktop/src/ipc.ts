@@ -9,6 +9,8 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import {
   COMMANDS,
   type BackgroundOutput,
+  type ContinuityArchive,
+  type ContinuityPage,
   type EnqueueOutcome,
   type KeepAwakeStatus,
   type ProviderUpdateResult,
@@ -28,6 +30,7 @@ import {
   type UrStartRequest,
   type NestedReport,
   type JobView,
+  type TeamChatView,
   type JobRetryPolicy,
   type AttachmentPreview,
   type GoalEdit,
@@ -186,6 +189,8 @@ export type OpenRequest = {
   mode: { mode: "new" } | { mode: "resume"; session_id: string } | { mode: "fork"; session_id: string };
   /** Which provider to launch. On a resume the session's own record wins. */
   provider?: Provider;
+  /** Pin this session to an account without changing the provider's active account. */
+  accountId?: string;
   model?: string;
   reasoningEffort?: string;
   /** The team the session starts with; absent keeps its own, or the default. */
@@ -258,6 +263,9 @@ export const api = {
   sessionSetConfigOption: (handle: SessionHandle, configId: string, value: unknown) =>
     call<unknown>(COMMANDS.sessionSetConfigOption, { request: { handle, configId, value } }),
   sessionStop: (handle: SessionHandle) => call<ExitInfo>(COMMANDS.sessionStop, { handle }),
+  continuitySave: (handle: SessionHandle, markdown: string) => call<ContinuityArchive>(COMMANDS.continuitySave, { handle, markdown }),
+  continuityAttach: (source: SessionHandle, target: SessionHandle, archiveId: string) => call<void>(COMMANDS.continuityAttach, { source, target, archiveId }),
+  continuityRead: (handle: SessionHandle, archiveId: string, offset = 0, limit = 12000) => call<ContinuityPage>(COMMANDS.continuityRead, { handle, archiveId, offset, limit }),
   sessionListOpen: () => call<OpenSessionEntry[]>(COMMANDS.sessionListOpen),
   /**
    * Retained events after `after`, fetched a page at a time: a long session's
@@ -492,7 +500,7 @@ export const api = {
     channel.onmessage = onProgress;
     return call<void>(COMMANDS.appUpdateInstall, { onProgress: channel });
   },
-  providerQuota: (provider: Provider) => call<QuotaSnapshot>(COMMANDS.providerQuota, { provider }),
+  providerQuota: (provider: Provider) => call<QuotaSnapshot | null>(COMMANDS.providerQuota, { provider }),
   providerLogout: (provider: Provider, account?: string) => call<void>(COMMANDS.providerLogout, { provider, account: account ?? null }),
   accountsList: (provider: Provider) => call<AccountView[]>(COMMANDS.accountsList, { provider }),
   accountAdd: (provider: Provider, label: string) => call<AccountView>(COMMANDS.accountAdd, { provider, label }),
@@ -503,6 +511,7 @@ export const api = {
   delegationComboSet: (handle: SessionHandle, combo: Combo) => call<Combo>(COMMANDS.delegationComboSet, { request: { handle, combo } }),
   delegationDefaultComboGet: () => call<Combo>(COMMANDS.delegationDefaultComboGet),
   delegationDefaultComboSet: (combo: Combo) => call<Combo>(COMMANDS.delegationDefaultComboSet, { combo }),
+  delegationChat: (handle: SessionHandle) => call<TeamChatView>(COMMANDS.delegationChat, { handle }),
   delegationJobs: (handle: SessionHandle) => call<JobView[]>(COMMANDS.delegationJobs, { handle }),
   delegationJobCancel: (handle: SessionHandle, jobId: string) => call<JobView>(COMMANDS.delegationJobCancel, { request: { handle, jobId } }),
   delegationJobRetry: (handle: SessionHandle, jobId: string) => call<JobView>(COMMANDS.delegationJobRetry, { request: { handle, jobId } }),

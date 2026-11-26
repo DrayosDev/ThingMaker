@@ -55,6 +55,7 @@ impl Engine {
     /// opens its orchestrator in it.
     pub(crate) async fn isolate(&self, state: &mut GoalState, loaded: &Loaded) -> Result<(), DesktopError> {
         let goal = &loaded.goal;
+        self.validate_goal_leader(goal)?;
         let source = self.db(|storage| storage.workspace_get(&goal.workspace_id))?.ok_or_else(|| DesktopError::not_ready("the goal's workspace is gone"))?;
         let root = Path::new(&source.canonical_root).to_path_buf();
         if !git::is_git_repository(&root) {

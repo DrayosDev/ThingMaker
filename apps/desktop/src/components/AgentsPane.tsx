@@ -6,6 +6,7 @@
  */
 import { useStore } from "../store";
 import { isBackground, type AgentNode } from "../projection";
+import { TeamChat } from "./TeamChat";
 import { JobsSection } from "./JobsSection";
 import { t } from "../i18n";
 
@@ -90,6 +91,7 @@ export function AgentsPane({ sessionId }: { sessionId: string }) {
 
   return (
     <div className="agents-pane">
+      <TeamChat key={sessionId} sessionId={sessionId} />
       <JobsSection sessionId={sessionId} />
       <section>
         <h3>{t("Subagents")}</h3>

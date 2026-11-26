@@ -3,7 +3,7 @@
  * next message goes. Nothing else changes until that message is sent, and
  * choosing the session's own provider again undoes it.
  */
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -54,6 +54,26 @@ beforeEach(() => handOff.mockClear());
 afterEach(cleanup);
 
 describe("switching provider from the model menu", () => {
+  it("shows the session's actual account even when another account is globally active", () => {
+    seed();
+    const changeAccount = vi.fn(async () => undefined);
+    const session = useStore.getState().sessions.s1!;
+    useStore.setState({
+      sessions: { s1: { ...session, snapshot: { ...session.snapshot, accountId: "work" } } },
+      accounts: { claude: [
+        { id: "default", provider: "claude", active: true, isDefault: true, label: "Main" },
+        { id: "work", provider: "claude", active: false, isDefault: false, label: "Work" },
+      ] }, loadAccounts: vi.fn(async () => undefined), setActiveAccount: changeAccount,
+    });
+    openModels();
+    const group = screen.getByRole("group", { name: "Account" });
+    expect(within(group).getByRole("button", { name: "Work" }).getAttribute("aria-pressed")).toBe("true");
+    const main = within(group).getByRole("button", { name: "Main account" });
+    expect(main.getAttribute("aria-pressed")).toBe("false");
+    fireEvent.click(main);
+    expect(changeAccount).toHaveBeenCalledWith("claude", "default", "s1");
+  });
+
   it("hides the adapter's agent picker", () => {
     seed();
     render(<ConfigPickers configOptions={OPTIONS} disabled={false} sessionId="s1" />);

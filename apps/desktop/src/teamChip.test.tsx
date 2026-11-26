@@ -119,6 +119,18 @@ describe("team chip", () => {
     expect(screen.getByRole("button", { name: /team: Codex crew/ })).toBeTruthy();
   });
 
+  it("applies a saved Gemini-led team and prepares its model for the next message", async () => {
+    const geminiLed: TeamPreset = { ...codexLed, id: "gemini-team", name: "Gemini crew", orchestrator: { provider: "gemini", model: "gemini-3.1-pro", effort: "high" } };
+    useStore.setState({ teamPresets: [studio, geminiLed] });
+    render(<TeamChip disabled={false} sessionId="s1" />);
+    fireEvent.click(screen.getByRole("button", { name: /team: / }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: /Gemini crew/ }));
+    await vi.waitFor(() => expect(useStore.getState().pendingProvider.s1).toEqual(geminiLed.orchestrator));
+    expect(saveTeam).toHaveBeenCalledWith("s1", geminiLed.combo);
+    expect(setConfigOption).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: /team: Gemini crew/ })).toBeTruthy();
+  });
+
   it("goes to Teams to make or change one", () => {
     render(<TeamChip disabled={false} sessionId="s1" />);
     fireEvent.click(screen.getByRole("button", { name: /team: / }));

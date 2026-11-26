@@ -171,10 +171,10 @@ export const PROVIDER_LABELS: Record<Provider, string> = { claude: "Claude Code"
 export const PROVIDER_SHORT: Record<Provider, string> = { claude: "CC", codex: "CX", gemini: "GM", local: "LM" };
 /**
  * Providers that can lead a team. An orchestrator has to take the session's
- * own `team` MCP server; Antigravity's `agy` only reads MCP servers from its
- * global configuration, so Gemini is a worker or a plain session.
+ * own `team` MCP server. Gemini team sessions use native `agy acp` to receive
+ * session-local servers without changing the user's shared configuration.
  */
-export const ORCHESTRATOR_PROVIDERS: readonly Provider[] = ["claude", "codex", "local"] as const;
+export const ORCHESTRATOR_PROVIDERS: readonly Provider[] = ["claude", "codex", "gemini", "local"] as const;
 
 /**
  * Local Models: models in Ollama on this computer, free and private. A model
@@ -348,6 +348,15 @@ export type Snapshot = {
   handle: SessionHandle;
   /** The provider this attachment runs on, and so which account it spends. */
   provider: Provider;
+  /** Account fixed when this attachment opened; independent of the global picker. */
+  accountId?: string | null;
+  /**
+   * Whether this attachment has the tools to lead a team. One without them
+   * (a Gemini session opened without a team, a local chat) cannot be given a
+   * team while it runs, and cannot read a continuity archive. Absent on an
+   * older host: assume it has.
+   */
+  leadsTeam?: boolean;
   historyStart: DecimalId;
   historyDropped: number;
   /** The agent's own id for the session, once `session/new` has answered. */
@@ -415,9 +424,9 @@ export function asConfigOptions(value: unknown): SessionConfigOption[] {
   return out;
 }
 
-/** Whether a config option is the reasoning effort, by either dialect's id. */
+/** Whether a config option is the reasoning effort, by the provider's advertised id. */
 export function isEffortOption(configId: string): boolean {
-  return configId === "effort" || configId === "reasoning_effort";
+  return configId === "effort" || configId === "reasoning_effort" || configId === "thought_level";
 }
 
 export type SubmissionOutcome =
@@ -549,12 +558,29 @@ export type MemberMcpDependency = { name: string; evidence: "declared" | "refere
 export type MemberResourceEntry = { id: string; kind: "skill" | "mcp"; name: string; description: string; group: string; source?: string; target?: string; available: boolean; problem: string | null; mcpDependencies?: MemberMcpDependency[]; dependencyNotes?: string[] };
 export type MemberResourceCatalog = { entries: MemberResourceEntry[]; notes: string[]; problem: string | null };
 
+/**
+ * Who on a team may message the others directly: nobody, its members on
+ * cloud providers, or everyone. A local model runs sandboxed and offline, and
+ * a message to a cloud member is a way out of that, so it is left out unless
+ * the team says `all`.
+ */
+export type AgentChat = "off" | "cloud" | "all";
+export const DEFAULT_AGENT_CHAT: AgentChat = "cloud";
+
 /** The team behind one orchestrator session. */
 export type Combo = {
   workers: WorkerSlot[];
   /** Whether the orchestrator may also start its own provider's subagents. Read at session start. */
   nativeSubagents: boolean;
+  /** Who may use the team chat; absent is the default, cloud members only. */
+  agentChat?: AgentChat;
 };
+
+/** A team with its chat setting changed; the default is left out, as the host stores it. */
+export function withAgentChat(combo: Combo, agentChat: AgentChat): Combo {
+  const { agentChat: _previous, ...rest } = combo;
+  return agentChat === DEFAULT_AGENT_CHAT ? rest : { ...rest, agentChat };
+}
 
 export const EMPTY_COMBO: Combo = { workers: [], nativeSubagents: false };
 
@@ -614,6 +640,8 @@ export type JobView = {
   workerClosed?: boolean;
   /** Taken by a worker that had already done an earlier job, keeping its context. */
   warm?: boolean;
+  /** Started by a message from another agent, not by the orchestrator's `delegate`. */
+  chat?: boolean;
 };
 
 /** Emitted by the host on every job change. */
@@ -806,7 +834,7 @@ export type OnReport = "wait" | "continue";
 export type OnPlanChange = "tasks_auto" | "review" | "auto";
 /** Which orchestrator a goal runs on. `either` starts where it is and moves
  *  when the account it is on is spent; the other two pin it. */
-/** Who runs a Big Thing goal. Gemini cannot lead (it takes no session MCP server). */
+/** Who runs a Big Thing goal. Separate from ordinary saved-team leadership. */
 export type Orchestrator = "claude" | "codex" | "either";
 
 /** What the Claude account said about itself when it was last asked.
@@ -1468,7 +1496,7 @@ export type ContextBundle = { id: string; name: string; instructions: string; re
 // Attachments and mentions (UX-06, UX-07)
 // ---------------------------------------------------------------------------
 
-export type MediaKind = "image" | "audio";
+export type MediaKind = "image" | "audio" | "document";
 export type AttachmentSnapshot = {
   id: string;
   name: string;
@@ -1479,6 +1507,7 @@ export type AttachmentSnapshot = {
   height?: number;
   blobPath: string;
   sourcePath?: string;
+  document?: { text: string; warnings: string[] };
 };
 export type AttachmentPreview = { id: string; mime: string; dataBase64: string };
 export type MentionMode = { mode: "path_reference" } | { mode: "copied_content"; startLine?: number; endLine?: number };
@@ -1617,7 +1646,19 @@ export type UiPrefs = {
   followUp: "queue" | "steer";
   /** Whether a newer ThingMaker found at startup is offered in a popup. Absent on older saves: on. */
   updateReminder?: boolean;
+  /** Save a private, readable context archive on a leader change. Absent means on. */
+  autoContinuity?: boolean;
 };
+
+/**
+ * One session's visible conversation, saved as immutable Markdown in
+ * ThingMaker's private data directory when its work moved to another leader.
+ * `parent` is the archive that session was itself handed, when it was a
+ * continuation: a line of hand-offs is read link by link, never copied.
+ */
+export type ContinuityArchive = { id: string; path: string; bytes: number; createdAtUnixMs: number; chars?: number; provider?: Provider; parent?: string | null };
+/** Character offsets count Unicode code points, matching the team reader. */
+export type ContinuityPage = { archive: ContinuityArchive; text: string; nextOffset: number | null; totalChars: number };
 
 /** A newer ThingMaker release than the running one (REL-03). */
 export type AvailableUpdate = { version: string; notes?: string; publishedAtUnixMs?: number };
@@ -1815,6 +1856,9 @@ export const COMMANDS = {
   sessionCancel: "session_cancel",
   sessionSetConfigOption: "session_set_config_option",
   sessionStop: "session_stop",
+  continuitySave: "continuity_save",
+  continuityAttach: "continuity_attach",
+  continuityRead: "continuity_read",
   sessionListOpen: "session_list_open",
   sessionArchive: "session_archive",
   sessionPin: "session_pin",
@@ -1936,6 +1980,7 @@ export const COMMANDS = {
   delegationComboSet: "delegation_combo_set",
   delegationDefaultComboGet: "delegation_default_combo_get",
   delegationDefaultComboSet: "delegation_default_combo_set",
+  delegationChat: "delegation_chat",
   delegationJobs: "delegation_jobs",
   delegationJobCancel: "delegation_job_cancel",
   delegationQuota: "delegation_quota",
@@ -2048,3 +2093,57 @@ export const COMMANDS = {
 
 export type CommandName = (typeof COMMANDS)[keyof typeof COMMANDS];
 
+
+
+/** One message between two agents of a session. */
+export interface TeamChatMessage {
+  id: number;
+  from: string;
+  to: string;
+  fromName: string;
+  toName: string;
+  /** The sender's provider, for its mark beside the message. */
+  fromProvider: Provider;
+  text: string;
+  replyTo: number | null;
+  sentAt: number;
+  delivered: boolean;
+  error: string | null;
+}
+
+/**
+ * Why a session's agents can send no more: `paused` after too many messages
+ * in a row started work without the person writing (it resumes when they
+ * do), `full` once the session's total is spent.
+ */
+export type TeamChatStop = "paused" | "full";
+
+/**
+ * The host's record that it wrote an agent's message into a conversation,
+ * under the token that prompt carries. A prompt is shown as another agent's
+ * only when its token has one of these for the session it is in.
+ */
+export interface TeamChatReceipt {
+  token: string;
+  /** The sender's address: `orchestrator`, or a job id. */
+  from: string;
+  fromName: string;
+  fromProvider: Provider;
+  sentAt: number;
+}
+
+/** A session's agent chat as the host reports it. */
+export interface TeamChatView {
+  /** The messages of the team this session leads; none for a worker's. */
+  messages: TeamChatMessage[];
+  /** The agent messages written into this session's own conversation. */
+  received?: TeamChatReceipt[];
+  stopped?: TeamChatStop;
+  /** Messages in a row that may start work before the chat pauses. */
+  unpromptedLimit: number;
+  /** Messages one session's agents may exchange in all. */
+  messageLimit: number;
+}
+
+/** Emitted by the host when a session's agent chat changes; the payload names the session. */
+export const TEAM_CHAT_EVENT = "thingmaker://team-chat";

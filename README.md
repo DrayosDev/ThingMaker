@@ -317,6 +317,25 @@ nothing is reachable until you turn phone access on.
    choose *Direct, through my own tunnel*, paste the public address (and an
    Access service token if your tunnel is behind Cloudflare Access), and save.
 
+**Run a named Cloudflare tunnel in the background on Windows**
+
+For an existing locally managed tunnel with a YAML configuration, copy
+[`run-thingmaker-tunnel-hidden.vbs`](scripts/run-thingmaker-tunnel-hidden.vbs)
+to a permanent location, such as `%USERPROFILE%\.cloudflared`. In Windows
+Task Scheduler, create a task for your user with an **At log on** trigger, or
+edit your existing tunnel task. Set its **Start a program** action to:
+
+- **Program/script** `wscript.exe`
+- **Add arguments** `//B //NoLogo "C:\path\to\run-thingmaker-tunnel-hidden.vbs" "C:\path\to\cloudflared.exe" "C:\path\to\thingmaker.yml"`
+
+Replace the example paths with your own. Set **If the task is already
+running** to **Do not start a new instance** and disable the task's execution
+time limit. For an existing task, stop its previous invocation before running
+the updated action. The launcher runs Cloudflare without a console and
+restarts it five seconds after it exits. With ThingMaker running, verify
+that `/v1/hello` at your public HTTPS address returns the host's details
+(include your Cloudflare Access headers if required).
+
 **Then, either way**
 
 1. **Install the app** with `pnpm phone` (Java 17 and the Android SDK; it

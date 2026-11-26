@@ -260,4 +260,10 @@ export const logic: Record<string, string> = {
   Blocked: "Bloqueado",
   harness: "harness",
   "{harness} · default": "{harness} · predeterminado",
+  "Continuity archive": "Archivo de continuidad",
+  "Private continuity archive available": "Archivo privado de continuidad disponible",
+  "Archive location": "Ubicación del archivo",
+  "The new leader can consult the earlier visible conversation a page at a time. Hidden reasoning, binary files and unsent drafts are not in it.": "El nuevo líder puede consultar la conversación visible anterior página a página. No incluye el razonamiento oculto, los archivos binarios ni los borradores sin enviar.",
+  "The new session receives a recent excerpt and can consult the private archive of the earlier conversation. Your draft stays editable; nothing is sent until you send it.": "La nueva sesión recibe un extracto reciente y puede consultar el archivo privado de la conversación anterior. Tu borrador sigue editable; no se envía nada hasta que lo envíes tú.",
+  "Export continuity…": "Exportar continuidad…",
 };

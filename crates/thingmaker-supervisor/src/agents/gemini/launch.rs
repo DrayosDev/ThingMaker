@@ -3,10 +3,12 @@
 //! `agy -p= --input-format stream-json --output-format stream-json` is one
 //! process for a whole conversation: a user event per line on stdin, events
 //! per line on stdout (docs/research/multi-provider-viability.md §7, S3).
-//! Unlike the other providers, everything about a session is a flag: the
+//! In stream-json mode everything about a session is a flag: the
 //! model, the effort, the permission mode and the conversation to resume. A
 //! change to any of them is a relaunch with `--conversation`, which the
 //! bridge does between turns.
+//! Native ACP sessions instead receive model/effort/mode after attachment
+//! and their session-local MCP servers through session/new or session/load.
 //!
 //! Permission stances, from the live probe:
 //!
@@ -161,6 +163,10 @@ pub struct GeminiLaunchOptions {
     pub resume: Option<String>,
     pub permission_mode: PermissionStance,
     pub account_home: Option<PathBuf>,
+    /// Native ACP receives session-local MCP servers; ordinary sessions retain stream-json.
+    pub native_acp: bool,
+    /// Guidance sent with the first prompt of each attachment, including resume.
+    pub initial_prompt_prefix: Option<String>,
 }
 
 impl GeminiLaunchOptions {
@@ -174,11 +180,24 @@ impl GeminiLaunchOptions {
             resume: None,
             permission_mode: PermissionStance::ReadOnly,
             account_home: None,
+            native_acp: false,
+            initial_prompt_prefix: None,
         }
     }
 
     /// The command line for the first launch.
     pub fn arguments(&self) -> Vec<String> {
+        if self.native_acp {
+            // The selected account's home remains the credential anchor. Never
+            // create a second home or rewrite its shared MCP configuration.
+            let mut args = match self.account_home.as_deref() {
+                Some(home) => acp_arguments(home),
+                None => vec!["acp".into()],
+            };
+            // Also required by agy for editor-provided HTTP MCP servers.
+            args.push("--process-per-session".into());
+            return args;
+        }
         arguments(self.model.as_deref(), self.effort.as_deref(), self.permission_mode, self.resume.as_deref())
     }
 }
@@ -216,6 +235,16 @@ pub fn mode_id(stance: PermissionStance) -> &'static str {
 /// file has nothing to resume.
 pub fn conversation_path(home: &Path, conversation: &str) -> PathBuf {
     home.join(".gemini/antigravity-cli/conversations").join(format!("{conversation}.db"))
+}
+
+/// CLI model variants include a thinking suffix; ACP advertises the base
+/// model and thinking level separately. Exact advertised IDs win first.
+pub fn native_model_selection(wanted: &str, offered: &[String]) -> Option<(String, Option<String>)> {
+    if offered.iter().any(|model| model == wanted) { return Some((wanted.to_string(), None)); }
+    offered.iter().filter_map(|model| {
+        let level = wanted.strip_prefix(model.as_str())?.strip_prefix('-')?;
+        matches!(level, "low" | "medium" | "high" | "xhigh" | "max").then(|| (model.clone(), Some(level.to_string())))
+    }).max_by_key(|(model, _)| model.len())
 }
 
 /// `agy` where its installer puts it, on PATH, or in the usual prefixes. A

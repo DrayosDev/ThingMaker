@@ -16,6 +16,16 @@ const preset = (name: string, id = name): TeamPreset => ({
 });
 
 describe("exporting teams", () => {
+  it("preserves a Gemini lead and its mixed-provider helpers across export and import", () => {
+    const team = preset("Gemini crew");
+    team.orchestrator = { provider: "gemini", model: "gemini-3.1-pro", effort: "high" };
+    team.combo.workers.push({ name: "reviewer", provider: "claude", model: "sonnet", capabilities: ["review"] });
+    const read = readTeamsFile(exportTeams([team]));
+    const [imported] = importedPresets(read.teams, []);
+    expect(imported?.orchestrator).toEqual(team.orchestrator);
+    expect(imported?.combo).toEqual(team.combo);
+  });
+
   it("round-trips restrictions, distinguishes empty from inherited, and rejects malformed policies", () => {
     const team = preset("Restricted");
     team.combo.workers[0]!.resources = { skills: ["skill:user:art"], mcps: [] };
@@ -33,6 +43,21 @@ describe("exporting teams", () => {
     const team = preset("Local");
     team.orchestrator = { provider: "local", model: "@agent/@codex/model", resources: { skills: [], mcps: ["mcp:user:local"] } };
     expect(readTeamsFile(exportTeams([team])).teams[0]?.orchestrator).toEqual(team.orchestrator);
+  });
+  it("keeps who may use agent chat, and reads anything else as the default", () => {
+    const open = preset("Open");
+    open.combo.agentChat = "all";
+    expect(JSON.parse(exportTeams([open])).teams[0].combo.agentChat).toBe("all");
+    expect(readTeamsFile(exportTeams([open])).teams[0]?.combo.agentChat).toBe("all");
+    const quiet = preset("Quiet");
+    quiet.combo.agentChat = "off";
+    expect(readTeamsFile(exportTeams([quiet])).teams[0]?.combo.agentChat).toBe("off");
+    const usual = preset("Usual");
+    usual.combo.agentChat = "cloud";
+    expect("agentChat" in JSON.parse(exportTeams([usual])).teams[0].combo).toBe(false);
+    const odd = JSON.parse(exportTeams([open]));
+    odd.teams[0].combo.agentChat = "everyone, always";
+    expect("agentChat" in readTeamsFile(JSON.stringify(odd)).teams[0]!.combo).toBe(false);
   });
   it("writes the teams without ids, in a file that says what it is", () => {
     const file = JSON.parse(exportTeams([preset("Art crew"), preset("Solo")], [], new Date("2026-11-06T00:00:00Z")));

@@ -9,8 +9,10 @@
  */
 import { create } from "zustand";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import type {
   AmendmentRecord,
+  ContinuityArchive,
   DiffScope,
   NewAmendment,
   AttachmentSnapshot,
@@ -52,15 +54,19 @@ import type {
   ProviderVersion,
   TurnPhase,
 } from "@thingmaker/contracts";
-import { EMPTY_COMBO, JOB_EVENT, ULTRA_REVIEW_EVENT, type UltraReview, type UrDecision, type UrStartRequest, SESSION_TITLE_EVENT, type SessionTitleChange, ODYSSEY_STATE_NOTE, PROVIDERS, PROVIDER_LABELS, BIGTHING_EVENT, asConfigOptions, ACCOUNT_PROVIDERS, isEffortOption, isRetiredModel, localAgentHarness, parseLocalModel, type LocalSessionSetup, type AccountView, type Combo, type JobView, type ProviderModel, type BigThingEvent, type BigThingRuntime, type NestedReport, type TeamPreset, type RenameReport, type WipeReport, type WorkerSlot } from "@thingmaker/contracts";
+import { EMPTY_COMBO, JOB_EVENT, TEAM_CHAT_EVENT, type TeamChatView, ULTRA_REVIEW_EVENT, type UltraReview, type UrDecision, type UrStartRequest, SESSION_TITLE_EVENT, type SessionTitleChange, ODYSSEY_STATE_NOTE, PROVIDERS, PROVIDER_LABELS, BIGTHING_EVENT, asConfigOptions, ACCOUNT_PROVIDERS, isEffortOption, isRetiredModel, localAgentHarness, parseLocalModel, type LocalSessionSetup, type AccountView, type Combo, type JobView, type ProviderModel, type BigThingEvent, type BigThingRuntime, type NestedReport, type TeamPreset, type RenameReport, type WipeReport, type WorkerSlot } from "@thingmaker/contracts";
 import { isLocalChat } from "./localModels";
 import { HANDOFF_SPLIT, handoffBrief, hasConversation, helperPresetFrom, readHelperPresets, readPresets, upsertHelperPreset, upsertJob, upsertPreset, withoutHandoff, type HelperPreset } from "./team";
 import { copiesItself, forkBranch, forkTitle, type ForkPoint } from "./fork";
+import { sessionUsesActiveAccount } from "./quotaRecovery";
+import { continuityBrief, continuityMarkdown } from "./continuity";
 
 /** Preference keys (scope `ui`) for saved teams. */
 const TEAM_PRESETS_KEY = "teamPresets";
 const HELPER_PRESETS_KEY = "helperPresets";
 const DEFAULT_PRESET_KEY = "defaultTeamPreset";
+const PROJECT_TEAM_PRESETS_KEY = "projectTeamPresets";
+let projectTeamWrite = Promise.resolve();
 import { t } from "./i18n";
 import { api } from "./ipc";
 import { notify, shouldNotify } from "./notifications";
@@ -146,7 +152,7 @@ export type View =
   | { kind: "teams" };
 
 /** Settings' tabs, in bar order. Integrations is one of them (⌘I). */
-export type SettingsTab = "general" | "chat" | "models" | "notifications" | "integrations" | "phone" | "data";
+export type SettingsTab = "general" | "chat" | "continuity" | "models" | "notifications" | "integrations" | "phone" | "data";
 
 export type SessionTab = "transcript" | "files" | "changes" | "terminal" | "agents" | "context" | "artifacts" | "images" | "odyssey" | "ultrareview";
 
@@ -241,7 +247,7 @@ type State = {
   odysseyPlanChanges: Record<string, PlanChangeRecord[]>;
   /** Decisions the agent handed to the user, newest first. */
   odysseyQuestions: Record<string, QuestionRecord[]>;
-  showHidden: boolean;
+  expandedArchives: Record<string, boolean>;
   view: View;
   sessions: Record<string, LiveSession>;
   sessionOrder: string[];
@@ -253,6 +259,15 @@ type State = {
   teams: Record<string, Combo>;
   /** Jobs per orchestrator session (by attachment handle), oldest first. */
   jobs: Record<string, JobView[]>;
+  /** Each live session's agent chat, as the host last reported it. */
+  teamChat: Record<string, TeamChatView>;
+  /** Reads a session's agent chat again; false when the host could not say. */
+  loadTeamChat: (sessionId: string) => Promise<boolean>;
+  /** Tokens of prompts shaped like an agent's message that the host has no
+   *  receipt for in that session: the person's own text, shown as theirs. */
+  teamChatUnknown: Record<string, string[]>;
+  /** Asks the host whether it wrote the prompt with this token into the session. */
+  checkTeamChat: (sessionId: string, token: string) => Promise<void>;
   /** Ultra-Reviews per session, by the agent's id for it, newest first. */
   ultraReviews: Record<string, UltraReview[]>;
   loadUltraReviews: (host: string) => Promise<void>;
@@ -274,6 +289,9 @@ type State = {
   helperPresets: HelperPreset[];
   /** The preset a new session starts with, when one is chosen. */
   defaultPresetId: string | null;
+  /** The saved team to use for each project's new sessions. */
+  projectTeamPresetIds: Record<string, string>;
+  setProjectTeamPreset: (workspaceId: string, presetId: string | null) => Promise<void>;
   drafts: Record<string, string>;
   /** The provider sign-in in progress, if any. */
   signIn: SignInRun | null;
@@ -371,6 +389,7 @@ type State = {
   loadUiPrefs: () => Promise<void>;
   setUiPrefs: (patch: Partial<UiPrefs>) => Promise<void>;
   exportTranscript: (sessionId: string) => Promise<void>;
+  exportContinuity: (sessionId: string) => Promise<void>;
   loadSettings: () => Promise<void>;
   saveSettings: (settings: NotificationSettings) => Promise<void>;
   testNotification: () => Promise<void>;
@@ -422,6 +441,8 @@ type State = {
    * is put in the new session's composer to read and send.
    */
   handOff: (sessionId: string, provider: Provider, preset?: TeamPreset) => Promise<void>;
+  /** Prepares an editable continuation after exhaustion; never sends a prompt. */
+  prepareQuotaContinuation: (sessionId: string, target: { provider: Provider; accountId?: string }) => Promise<string | null>;
   /**
    * Copies a session into a new one nested under it, on the same provider,
    * model, effort and team, and opens it. With a point, the copy ends there
@@ -468,7 +489,7 @@ type State = {
   /** Makes a preset (or none) what a new session starts with. */
   setDefaultPreset: (id: string | null) => Promise<void>;
   /** Starts a session led by the preset's orchestrator, with its workers. */
-  openSessionWithPreset: (workspaceId: string, preset: TeamPreset, message?: string) => Promise<void>;
+  openSessionWithPreset: (workspaceId: string, preset: TeamPreset, message?: string, attachments?: AttachmentSnapshot[]) => Promise<void>;
   /**
    * Applies a preset to a live session. Workers change at once; the
    * orchestrator's model and effort are set through its own options. A
@@ -537,7 +558,7 @@ type State = {
   noteClaudeLimit: (message: string | null | undefined) => boolean;
   /** Asks the Claude account whether it has room, without spending a turn. */
   refreshClaudeUsage: () => Promise<UsageSnapshot | null>;
-  setShowHidden: (show: boolean) => void;
+  toggleArchiveList: (workspaceId: string) => void;
   /** Opens or resumes a session. A resume runs on the provider that wrote it; a new one on `provider`, else the last one used. */
   openSession: (workspaceId: string, mode: OpenMode, provider?: Provider, launch?: NewSessionLaunch) => Promise<void>;
   /** Opens a fresh session on a named agent and returns how to address it. */
@@ -654,10 +675,223 @@ export type PendingProvider = { resources?: WorkerSlot["resources"]; provider: P
 /** The session a fork is copied from: open (`key`) or only in the list. */
 export type ForkSource = { workspaceId: string; agentSessionId: string; provider: Provider; key?: string };
 
-/** A session that carries on another's conversation on a different provider. */
-export type Continuation = { fromAgentSessionId: string; fromProvider: Provider };
+/**
+ * A session that carries on another's conversation on a different provider.
+ * `briefPending` says a prepared brief is waiting for the session's first
+ * message; the brief itself is kept apart (see `pendingBriefKey`).
+ * `pendingBrief` is how development builds kept it, and is never written.
+ */
+export type Continuation = { fromAgentSessionId: string; fromProvider: Provider; briefPending?: boolean; pendingBrief?: string; archive?: ContinuityArchive; target?: { workspaceId: string; provider: Provider; accountId: string } };
+
+/** A durable id can coincide across accounts/providers. Never inject another
+ * account's pending text or show its private archive location. */
+export function sessionContinuation(session: LiveSession | undefined, continuations: Record<string, Continuation>): Continuation | undefined {
+  const entry = session?.snapshot.agentSessionId ? continuations[session.snapshot.agentSessionId] : undefined;
+  if (!entry || !session) return undefined;
+  // Older records have no trustworthy account/workspace provenance. A link
+  // without private context is safe to keep; pending text needs a fresh handoff.
+  if (!entry.target) return entry.archive || entry.pendingBrief || entry.briefPending ? undefined : entry;
+  if (entry.target.workspaceId !== session.workspaceId || entry.target.provider !== session.snapshot.provider) return undefined;
+  if (entry.target.accountId === (session.snapshot.accountId ?? "default")) return entry;
+  // The same conversation, moved to another account: the link back to the
+  // earlier one is still its own. What was prepared for the first account
+  // (the archive, a waiting brief) stays with that account.
+  return { fromAgentSessionId: entry.fromAgentSessionId, fromProvider: entry.fromProvider };
+}
+
+function continuationTarget(session: LiveSession) {
+  return { workspaceId: session.workspaceId, provider: session.snapshot.provider, accountId: session.snapshot.accountId ?? "default" };
+}
 
 const CONTINUATIONS_KEY = "session_continuations";
+/** Continuations kept: years of them, and well inside what one preference may hold. */
+const CONTINUATIONS_KEPT = 300;
+const quotaContinuationSessions = new Set<string>();
+const quotaContinuationProviders = new Set<Provider>();
+const leaderContinuations = new Set<string>();
+let continuationWrites: Promise<unknown> = Promise.resolve();
+
+/**
+ * Records that a session carries on another's. The record is a convenience
+ * (the link back, the archive's notice), kept in one preference with every
+ * other continuation: a write that fails, as one over the preference size
+ * limit does, must not undo a change of leader that has otherwise worked. So
+ * the record is kept in memory at once and the write is not waited on to
+ * succeed.
+ */
+function saveContinuation(get: Get, set: Set, agent: string, entry: Continuation): Promise<void> {
+  const { [agent]: _replaced, ...others } = get().continuations;
+  // Newest last; the oldest go once there are more than are kept.
+  const kept = Object.entries({ ...others, [agent]: entry }).slice(-CONTINUATIONS_KEPT);
+  set({ continuations: Object.fromEntries(kept) });
+  const write = continuationWrites.catch(() => undefined).then(() => api.prefSet(CONTINUATIONS_KEY, get().continuations)).then(() => undefined, () => undefined);
+  continuationWrites = write;
+  return write;
+}
+
+/**
+ * Where a prepared continuation's brief waits until its first message is
+ * sent: a preference of its own per session. A brief runs to tens of
+ * kilobytes, and kept inside the map of continuations a handful of unsent
+ * ones filled the 256 KiB a preference may hold, after which no continuation
+ * could be recorded at all.
+ */
+const pendingBriefKey = (agent: string) => `continuation_brief:${agent}`;
+
+/** Keeps a prepared brief for after a restart. Losing it costs only that. */
+async function keepPendingBrief(agent: string, brief: string): Promise<void> {
+  await api.prefSet(pendingBriefKey(agent), brief).catch(() => undefined);
+}
+
+/** Puts a waiting brief back in front of a continuation's first message. */
+async function restorePendingBrief(get: Get, set: Set, sessionId: string): Promise<void> {
+  const waiting = () => {
+    const session = get().sessions[sessionId];
+    const entry = sessionContinuation(session, get().continuations);
+    return entry?.briefPending && !get().sideBrief[sessionId] ? session?.snapshot.agentSessionId ?? null : null;
+  };
+  const agent = waiting();
+  if (!agent) return;
+  const brief = await api.prefGet<string>(pendingBriefKey(agent)).catch(() => null);
+  // Sent, or replaced, while it was being read.
+  if (typeof brief !== "string" || !brief || waiting() !== agent) return;
+  set({ sideBrief: { ...get().sideBrief, [sessionId]: brief } });
+}
+
+/** Freeze the exposed conversation, then recover retained events still waiting
+ * for the renderer. Never put drafts or queued prompts in the document. */
+async function continuityDocument(get: Get, session: LiveSession): Promise<{ markdown: string; sequence: string }> {
+  const projection = structuredClone(session.projection);
+  const snapshot = await api.sessionSnapshot(session.handle);
+  if (!snapshot.agentSessionId || snapshot.agentSessionId !== session.snapshot.agentSessionId) throw new Error("Cannot read continuity state without a stable native session ID.");
+  const [jobs, goal] = await Promise.all([
+    api.delegationJobs(session.handle),
+    api.odysseyForSession(session.workspaceId, snapshot.agentSessionId),
+  ]);
+  if (BigInt(snapshot.lastSequence) > BigInt(projection.lastSequence)) {
+    const events = await api.sessionHistory(session.handle, projection.lastSequence);
+    for (const event of events) {
+      if (BigInt(event.sequence) > BigInt(snapshot.lastSequence)) break;
+      if (BigInt(event.sequence) > BigInt(projection.lastSequence)) applyEvent(projection, event);
+    }
+  }
+  const workspace = get().workspaces.find((entry) => entry.id === session.workspaceId);
+  const warnings: string[] = [];
+  if (snapshot.historyDropped > 0) warnings.push(`The native replay buffer has dropped ${snapshot.historyDropped} earlier events. Visible history already cached by ThingMaker is included, but earlier unavailable content cannot be recovered or guaranteed complete.`);
+  if (projection.snapshotNeeded) warnings.push("The conversation cache reported a history gap; some earlier content may be unavailable.");
+  if (BigInt(projection.lastSequence) < BigInt(snapshot.lastSequence)) warnings.push("Some events up to the snapshot were unavailable for replay. This document may be incomplete.");
+  const markdown = continuityMarkdown({
+    title: sessionTitle(session), provider: snapshot.provider, agentSessionId: snapshot.agentSessionId,
+    workspacePath: workspace?.displayPath ?? workspace?.canonicalRoot ?? session.workspaceId,
+    projection, ...(get().teams[session.handle.id] ? { team: get().teams[session.handle.id]! } : {}), goal, jobs,
+  });
+  return { markdown: warnings.length ? `> Context availability warnings\n> ${warnings.join("\n> ")}\n\n${markdown}` : markdown, sequence: snapshot.lastSequence };
+}
+
+/** What a change of leader carries from the session being left. */
+type HandoffContext = { excerpt: string; archive?: ContinuityArchive; sequence?: string };
+
+/**
+ * The recent excerpt and, when archives are kept, the session's visible
+ * conversation saved for the new leader to consult.
+ *
+ * The archive is an extra. When it cannot be made (the conversation is over
+ * the archive's size limit, the storage refused, the session has no durable
+ * id yet) the excerpt goes alone, as it did before archives existed, rather
+ * than the change of leader failing. A phone never makes one: archives are
+ * written on the computer, by the computer's own interface.
+ */
+async function handoffContext(get: Get, session: LiveSession, budget = 6000): Promise<HandoffContext> {
+  const excerpt = get().sideBrief[session.handle.id] ?? handoffBrief(session.projection.cards, session.snapshot.provider, budget);
+  if (get().uiPrefs.autoContinuity === false || IS_REMOTE) return { excerpt };
+  try {
+    const { markdown, sequence } = await continuityDocument(get, session);
+    return { excerpt, archive: await api.continuitySave(session.handle, markdown), sequence };
+  } catch {
+    return { excerpt };
+  }
+}
+
+/** Whether a session has the tool an archive is read with. */
+function readsArchives(snapshot: Snapshot): boolean {
+  return !isLocalChat(snapshot) && snapshot.leadsTeam !== false;
+}
+
+/**
+ * Binds the archive to the session taking over, and words that session's
+ * brief. A session with no way to read one (a local chat, or any session
+ * without the team tools) gets the excerpt alone, and so does one the
+ * archive could not be bound to: the change of leader goes ahead either way.
+ */
+async function bindArchive(source: LiveSession, target: LiveSession | undefined, context: HandoffContext): Promise<{ brief: string; archive?: ContinuityArchive }> {
+  const { excerpt, archive } = context;
+  if (!archive || !target || !readsArchives(target.snapshot)) return { brief: excerpt };
+  try {
+    await api.continuityAttach(source.handle, target.handle, archive.id);
+    return { brief: continuityBrief(excerpt, archive), archive };
+  } catch {
+    return { brief: excerpt };
+  }
+}
+
+function idleHandoffSource(get: Get, sessionId: string): LiveSession {
+  const source = get().sessions[sessionId];
+  if (!source || source.projection.attachment !== "attached" || source.projection.process === "exited") throw { code: "NOT_READY", message: t("The source session changed while the continuation was opening. Try again."), retry: "user_action" };
+  const p = source.projection;
+  if (source.inFlightRequestId || source.pendingPrompt || source.steerInFlight
+    || ["running", "awaiting_user", "cancelling"].includes(p.foreground) || p.autonomous.size
+    || [...p.detached.values()].some((value) => value === "active" || value === "cancellation_requested")
+    || [...p.background.values()].some((value) => value.state === "running")
+    || [...p.inspector.agents.values()].some((value) => value.status === "working" || value.status === "starting")
+    || (get().jobs[sessionId] ?? []).some((job) => ["starting", "running", "waiting"].includes(job.status))) throw { code: "NOT_READY", message: t("Wait for this session and its workers to finish before preparing a continuation."), retry: "user_action" };
+  if (p.queue.items.length || p.queue.sending) throw { code: "NOT_READY", message: t("Resolve or remove the queued messages before preparing a continuation."), retry: "user_action" };
+  const goal = get().odyssey[sessionId]?.goal;
+  if (goal && goal.state !== "complete" && goal.state !== "abandoned") throw { code: "NOT_READY", message: t("Move this goal from the Big Thing tab so its progress follows it."), retry: "user_action" };
+  return source;
+}
+
+async function validateLeaderSource(get: Get, expected: LiveSession, sequence?: string) {
+  const check = () => {
+    const current = idleHandoffSource(get, expected.handle.id);
+    if (current.handle.attachmentGeneration !== expected.handle.attachmentGeneration
+      || current.snapshot.agentSessionId !== expected.snapshot.agentSessionId
+      || current.snapshot.provider !== expected.snapshot.provider
+      || (current.snapshot.accountId ?? "default") !== (expected.snapshot.accountId ?? "default")) throw { code: "NOT_READY", message: t("The source session changed while the continuation was opening. Try again."), retry: "user_action" };
+  };
+  check();
+  const [snapshot, jobs, goal] = await Promise.all([
+    api.sessionSnapshot(expected.handle), api.delegationJobs(expected.handle),
+    expected.snapshot.agentSessionId ? api.odysseyForSession(expected.workspaceId, expected.snapshot.agentSessionId) : Promise.resolve(null),
+  ]);
+  check();
+  if ((sequence !== undefined && snapshot.lastSequence !== sequence)
+    || snapshot.agentSessionId !== expected.snapshot.agentSessionId || snapshot.provider !== expected.snapshot.provider
+    || (snapshot.accountId ?? "default") !== (expected.snapshot.accountId ?? "default")) throw { code: "NOT_READY", message: t("The source session changed while the continuation was opening. Try again."), retry: "user_action" };
+  if (["running", "awaiting_user", "cancelling"].includes(snapshot.foreground) || snapshot.autonomousTurns.length
+    || Object.values(snapshot.detachedCalls).some((value) => value === "active" || value === "cancellation_requested")
+    || snapshot.backgroundTasks?.some((value) => value.state === "running")
+    || jobs.some((job) => ["starting", "running", "waiting"].includes(job.status))) throw { code: "NOT_READY", message: t("Wait for this session and its workers to finish before preparing a continuation."), retry: "user_action" };
+  if (snapshot.queue?.items.length || snapshot.queue?.sending) throw { code: "NOT_READY", message: t("Resolve or remove the queued messages before preparing a continuation."), retry: "user_action" };
+  if (goal && goal.goal.state !== "complete" && goal.goal.state !== "abandoned") throw { code: "NOT_READY", message: t("Move this goal from the Big Thing tab so its progress follows it."), retry: "user_action" };
+}
+
+async function discardContinuation(get: Get, set: Set, handle: SessionHandle) {
+  try {
+    await api.sessionStop(handle);
+    const { [handle.id]: _unused, ...sessions } = get().sessions;
+    const { [handle.id]: _brief, ...sideBrief } = get().sideBrief;
+    set({ sessions, sideBrief, sessionOrder: get().sessionOrder.filter((key) => key !== handle.id) });
+  } catch { /* Keep a target that could not be stopped visible. */ }
+}
+
+function consumeContinuationBrief(get: Get, set: Set, sessionId: string) {
+  const agent = get().sessions[sessionId]?.snapshot.agentSessionId;
+  const entry = sessionContinuation(get().sessions[sessionId], get().continuations);
+  if (!agent || !entry?.briefPending) return;
+  const { briefPending: _sent, ...history } = entry;
+  void saveContinuation(get, set, agent, history);
+  void api.prefSet(pendingBriefKey(agent), null).catch(() => undefined);
+}
 
 export function sessionTitle(session: LiveSession, records?: SessionRecord[]): string {
   const id = session.snapshot.agentSessionId;
@@ -746,7 +980,7 @@ function launchDefaults(defaults: SessionDefaults, provider: Provider): { model?
  * override the remembered ones, a team, and a first message that goes out as
  * soon as the agent is ready.
  */
-export type NewSessionLaunch = { resources?: WorkerSlot["resources"]; model?: string; reasoningEffort?: string; combo?: Combo; message?: string };
+export type NewSessionLaunch = { resources?: WorkerSlot["resources"]; model?: string; reasoningEffort?: string; combo?: Combo; message?: string; attachments?: AttachmentSnapshot[]; /** The account to open the session on, instead of the one it was on or the active one. */ accountId?: string };
 
 /** The adapter's alias for its current Opus. */
 const CLAUDE_DEFAULT_MODEL = "opus";
@@ -772,6 +1006,12 @@ export function readSessionDefaults(raw: unknown): SessionDefaults {
   const defaults: SessionDefaults = {};
   for (const provider of PROVIDERS) if (value[provider]) defaults[provider] = pick(value[provider]);
   return defaults;
+}
+
+/** Resolves the current preset, so edits take effect and deleted teams fall back to one agent. */
+export function projectTeamPreset(state: Pick<State, "projectTeamPresetIds" | "teamPresets" | "quickChats">, workspaceId: string): TeamPreset | undefined {
+  if (state.quickChats.some((chat) => chat.workspaceId === workspaceId)) return undefined;
+  return state.teamPresets.find((preset) => preset.id === state.projectTeamPresetIds[workspaceId]);
 }
 
 /** Where a new session starts when nobody asked for a provider: Claude when it can run, else the first that can. */
@@ -895,11 +1135,20 @@ async function attachLive(get: Get, set: Set, handle: SessionHandle, workspaceId
     usage: existing?.usage ?? EMPTY_SESSION_USAGE,
       lastEventAt: existing?.lastEventAt ?? null,
 };
+  const sameAttachment = existing?.workspaceId === workspaceId && existing.snapshot.provider === snapshot.provider
+    && existing.snapshot.agentSessionId === snapshot.agentSessionId
+    && (existing.snapshot.accountId ?? "default") === (snapshot.accountId ?? "default");
+  const previousBrief = sameAttachment ? get().sideBrief[id] : undefined;
+  const { [id]: _staleBrief, ...otherBriefs } = get().sideBrief;
   set({
     sessions: { ...get().sessions, [id]: live },
     sessionOrder: [...get().sessionOrder.filter((s) => s !== id), id],
+    sideBrief: previousBrief ? { ...otherBriefs, [id]: previousBrief } : otherBriefs,
     ...(focus ? { view: { kind: "session", sessionId: id } as View, sessionTab: "transcript" as SessionTab } : {}),
   });
+  // A continuation prepared before a restart still owes its first message
+  // the brief.
+  void restorePendingBrief(get, set, id);
   // Read any goal this session is driving now rather than when its tab is
   // first opened: a run has to continue whether or not anyone is looking.
   void get().loadOdyssey(id);
@@ -938,7 +1187,7 @@ async function attachLive(get: Get, set: Set, handle: SessionHandle, workspaceId
       }
       if (payload.type === "quota") {
         const { type: _type, ...quota } = payload;
-        get().noteQuota(quota);
+        if (sessionUsesActiveAccount(current.snapshot, get().accounts)) get().noteQuota(quota);
       }
       if (payload.type === "turn" && payload.effect === "settled" && payload.kind === "foreground") {
         turnStartedAt = null;
@@ -986,11 +1235,14 @@ async function attachLive(get: Get, set: Set, handle: SessionHandle, workspaceId
 /**
  * Whether a pending choice moves the conversation to a new session: another
  * provider, or a local chat becoming a local agent (or back), which run as
- * different programs.
+ * different programs. With `team`, the team the next message is for: a
+ * Gemini session opened without one runs in a mode that cannot take one
+ * while it runs, so helpers to lead move it to a new Gemini session too.
  */
-export function switchesSession(session: { snapshot: Parameters<typeof isLocalChat>[0]; localSetup?: LocalSessionSetup } | undefined, pending: PendingProvider): boolean {
+export function switchesSession(session: { snapshot: Parameters<typeof isLocalChat>[0] & { leadsTeam?: boolean }; localSetup?: LocalSessionSetup } | undefined, pending: PendingProvider, team?: Combo): boolean {
   const snapshot = session?.snapshot;
   if (!snapshot || pending.provider !== snapshot.provider) return true;
+  if (pending.provider === "gemini") return snapshot.leadsTeam === false && (team?.workers.length ?? 0) > 0;
   if (pending.provider !== "local" || !pending.model) return false;
   const harness = localAgentHarness(pending.model);
   if (harness && !isLocalChat(snapshot)) {
@@ -1013,6 +1265,9 @@ function refreshAccountModels(get: Get, set: Set, provider: Provider) {
   void get().loadProviderModels(provider, true);
 }
 
+/** Receipt checks under way, by session and token, so a card redrawn while one runs does not ask again. */
+const teamChatChecks = new Set<string>();
+
 export const useStore = create<State>((set, get) => ({
   providers: null,
   providerVersions: null,
@@ -1032,7 +1287,7 @@ export const useStore = create<State>((set, get) => ({
   odysseyMovedAway: {},
   odysseyPlanChanges: {},
   odysseyQuestions: {},
-  showHidden: false,
+  expandedArchives: {},
   view: { kind: "welcome" },
   sessions: {},
   sessionOrder: [],
@@ -1042,6 +1297,8 @@ export const useStore = create<State>((set, get) => ({
   drafts: {},
   teams: {},
   jobs: {},
+  teamChat: {},
+  teamChatUnknown: {},
   ultraReviews: {},
   defaultCombo: EMPTY_COMBO,
   providerModels: {},
@@ -1051,6 +1308,7 @@ export const useStore = create<State>((set, get) => ({
   teamPresets: [],
   helperPresets: [],
   defaultPresetId: null,
+  projectTeamPresetIds: {},
   signIn: null,
   accounts: {},
   starting: null,
@@ -1084,7 +1342,7 @@ export const useStore = create<State>((set, get) => ({
 
   async bootstrap() {
     try {
-      const [profiles, workspaces] = await Promise.all([api.executionProfiles(), api.workspaceList()]);
+      const [profiles, workspaces] = await Promise.all([api.executionProfiles(), api.workspaceList(), get().loadTeamPresets()]);
       set({ profiles, workspaces });
       void get().loadSettings();
       void get().loadUiPrefs();
@@ -1118,17 +1376,40 @@ export const useStore = create<State>((set, get) => ({
       // to the conversation it had open.
       const rehydrated = get().rehydrate();
       void get().loadDefaultCombo();
-      // Both accounts' usage for the sidebar, now and every five minutes: the
-      // sessions report it too, but only while one is running.
+      // Refresh sidebar usage when the Windows app is active. The host also
+      // checks foreground ownership before starting a CLI, including for calls from the phone.
+      const usageInterval = 5 * 60_000;
       const readUsage = () => {
-        // Local Models are free: there is no usage to read.
         for (const provider of PROVIDERS) if (provider !== "local") void get().refreshUsage(provider);
       };
-      readUsage();
-      setInterval(readUsage, 5 * 60_000);
-      void get().loadTeamPresets();
+      if (!IS_REMOTE && navigator.userAgent.includes("Windows")) {
+        let nextUsagePoll = 0;
+        let usageTimer: ReturnType<typeof setTimeout>;
+        const pollWhileFocused = () => {
+          clearTimeout(usageTimer);
+          const now = Date.now();
+          if (now >= nextUsagePoll) {
+            nextUsagePoll = now + usageInterval;
+            readUsage();
+          }
+          usageTimer = setTimeout(pollWhileFocused, nextUsagePoll - now);
+        };
+        const appWindow = getCurrentWindow();
+        let focusReported = false;
+        void appWindow.onFocusChanged(({ payload: focused }) => {
+          focusReported = true;
+          if (focused) pollWhileFocused();
+          else clearTimeout(usageTimer);
+        }).then(async () => {
+          if (await appWindow.isFocused() && !focusReported) pollWhileFocused();
+        }).catch(() => undefined);
+      } else {
+        readUsage();
+        setInterval(readUsage, usageInterval);
+      }
       void get().loadQuickChats();
       void listen<JobView>(JOB_EVENT, (event) => get().noteJob(event.payload));
+      void listen<{ handle: string }>(TEAM_CHAT_EVENT, (event) => void get().loadTeamChat(event.payload.handle));
       void listen<UltraReview>(ULTRA_REVIEW_EVENT, (event) => get().noteUltraReview(event.payload));
       void listen<BigThingEvent>(BIGTHING_EVENT, (event) => get().noteBigThing(event.payload));
       void listen<SessionTitleChange>(SESSION_TITLE_EVENT, (event) => get().noteSessionTitle(event.payload));
@@ -1357,8 +1638,10 @@ export const useStore = create<State>((set, get) => ({
     try {
       const quota = await api.providerQuota(provider);
       // A reading is for the account it was asked about, or it is not one.
-      if (!quota || quota.provider !== provider) throw new Error("no reading");
-      get().noteQuota(quota);
+      if (quota) {
+        if (quota.provider !== provider) throw new Error("reading for another provider");
+        get().noteQuota(quota);
+      }
     } catch {
       // A reading that cannot be taken leaves the last one in place; it is
       // evidence, never a decision. Claude's refusal-based reading is the
@@ -1467,7 +1750,8 @@ export const useStore = create<State>((set, get) => ({
     // readings arrive as quota events on the session's own stream, so a turn
     // boundary reads the latest one rather than asking anything.
     if (get().sessionAgent(sessionId) !== "codex") return;
-    const snapshot = get().usage.codex ?? null;
+    const snapshot = before.projection.quota ? usageFromQuota(before.projection.quota)
+      : sessionUsesActiveAccount(before.snapshot, get().accounts) ? get().usage.codex ?? null : null;
     const patch = (usage: Partial<SessionUsage>) => {
       const current = get().sessions[sessionId];
       if (current) set({ sessions: { ...get().sessions, [sessionId]: { ...current, usage: { ...current.usage, ...usage } } } });
@@ -2008,8 +2292,10 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
-  setShowHidden(show) {
-    set({ showHidden: show });
+  toggleArchiveList(workspaceId) {
+    set((state) => ({
+      expandedArchives: { ...state.expandedArchives, [workspaceId]: !state.expandedArchives[workspaceId] },
+    }));
   },
 
   /**
@@ -2459,15 +2745,55 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
+  async exportContinuity(sessionId) {
+    const session = get().sessions[sessionId];
+    if (!session) return;
+    set({ error: null });
+    try {
+      // This session's own conversation, as it stands: an export saves no
+      // archive. In front of it, oldest first, the conversations it was
+      // handed, read back from their archives one link at a time.
+      const { markdown } = await continuityDocument(get, session);
+      const earlier: string[] = [];
+      let next = sessionContinuation(session, get().continuations)?.archive?.id ?? null;
+      while (next && earlier.length < 32) {
+        const id: string = next;
+        const pages: string[] = [];
+        next = null;
+        try {
+          for (let offset = 0; ;) {
+            const page = await api.continuityRead(session.handle, id, offset, 24000);
+            pages.push(page.text);
+            next = page.archive.parent ?? null;
+            if (page.nextOffset === null) break;
+            if (page.nextOffset <= offset) throw new Error("The continuity reader returned a non-advancing page.");
+            offset = page.nextOffset;
+          }
+        } catch {
+          // An archive that is gone, or was changed, ends the line there.
+          break;
+        }
+        earlier.unshift(pages.join(""));
+      }
+      await api.saveTextFile(`continuity-${session.handle.id.slice(0, 12)}.md`, [...earlier, markdown].join("\n\n---\n\n"));
+    } catch (error) {
+      set({ error: asError(error) });
+      throw error;
+    }
+  },
+
   async openSession(workspaceId, mode, provider, launch) {
+    if (mode.mode === "new" && provider === undefined && launch === undefined) {
+      const preset = projectTeamPreset(get(), workspaceId);
+      if (preset) return get().openSessionWithPreset(workspaceId, preset);
+    }
     // Which program wrote this session decides which one can resume it. The
     // record knows, and the native side reads it again on a resume: launching
     // one provider against another's session id would ask the wrong program
     // for a session it has never heard of.
     const recorded = mode.mode === "resume" ? (get().records[workspaceId] ?? []).find((record) => record.agentSessionId === mode.session_id)?.provider : undefined;
     const defaults = get().sessionDefaults;
-    // A new session starts with no team, on the default model: a team is
-    // chosen from the composer's "Set team", or a preset is opened directly.
+    // Without a project team or an explicit preset, new sessions use the default model.
     // A session the app is already running — a worker a delegation opened —
     // is shown, not resumed: a second process on the same session is refused
     // by the agent, and would compete with the first one if it were not.
@@ -2487,21 +2813,25 @@ export const useStore = create<State>((set, get) => ({
       workspaceId,
       provider: chosen,
       draft: message,
-      queued: !!message,
+      queued: !!message || !!launch?.attachments?.length,
       ...(mode.mode === "resume" ? { resuming: true, ...(title ? { title } : {}) } : {}),
     };
     set({ starting, view: { kind: "starting" }, error: null, lockedResume: null });
+    if (launch?.attachments?.length) get().addAttachments(starting.id, launch.attachments);
     // The chat gives way to the session once it is attached, unless the
     // person went elsewhere meanwhile; what was written carries over.
     const settle = (handleId: string) => {
       const waited = get().starting;
       if (waited?.id !== starting.id) return;
       if (get().view.kind === "starting") get().selectSession(handleId);
-      set({ starting: null });
+      const files = get().attachments[starting.id] ?? [];
+      if (files.length) get().addAttachments(handleId, files);
+      const { [starting.id]: _transferred, ...attachments } = get().attachments;
+      set({ starting: null, attachments });
       if (waited.draft) {
         get().setDraft(handleId, waited.draft);
-        if (waited.queued) void get().send(handleId);
       }
+      if (waited.queued && (waited.draft.trim() || files.length)) void get().send(handleId);
     };
     if (mode.mode === "resume") {
       try {
@@ -2525,6 +2855,7 @@ export const useStore = create<State>((set, get) => ({
         ...(launch?.reasoningEffort ? { reasoningEffort: launch.reasoningEffort } : {}),
         ...(launch?.resources ? { resources: launch.resources } : {}),
         ...(launch?.combo ? { combo: launch.combo } : {}),
+        ...(launch?.accountId ? { accountId: launch.accountId } : {}),
       });
       // Keep the preparation view visible through snapshot, subscription and
       // history loading. A half-attached session otherwise looks like a blank chat.
@@ -2580,6 +2911,19 @@ export const useStore = create<State>((set, get) => ({
   async saveTeam(sessionId, combo) {
     const session = get().sessions[sessionId];
     if (!session) return;
+    // A Gemini session opened without a team has no team tools and cannot be
+    // given them while it runs. The team is kept for it here, and with
+    // helpers to lead the next message continues in a new Gemini session
+    // that leads them, as a change of provider would.
+    if (session.snapshot.provider === "gemini" && session.snapshot.leadsTeam === false) {
+      set({ teams: { ...get().teams, [sessionId]: combo } });
+      const options = asConfigOptions(session.projection.configOptions ?? session.snapshot.configOptions);
+      const chosen = (value: unknown) => (typeof value === "string" && value !== "default" ? value : undefined);
+      const model = chosen(options.find((option) => option.configId === "model")?.currentValue);
+      const effort = chosen(options.find((option) => isEffortOption(option.configId))?.currentValue);
+      get().setPendingProvider(sessionId, get().pendingProvider[sessionId] ?? { provider: "gemini", ...(model ? { model } : {}), ...(effort ? { effort } : {}) });
+      return;
+    }
     try {
       const saved = await api.delegationComboSet(session.handle, combo);
       set({ teams: { ...get().teams, [sessionId]: saved } });
@@ -2616,6 +2960,36 @@ export const useStore = create<State>((set, get) => ({
       return models;
     } catch {
       return [];
+    }
+  },
+
+  async loadTeamChat(sessionId) {
+    const session = get().sessions[sessionId];
+    if (!session) return false;
+    try {
+      const view = await api.delegationChat(session.handle);
+      if (!view || !Array.isArray(view.messages)) return false;
+      // Asked for often while the chat is on screen: an unchanged answer
+      // redraws nothing.
+      if (JSON.stringify(get().teamChat[sessionId]) !== JSON.stringify(view)) set({ teamChat: { ...get().teamChat, [sessionId]: view } });
+      return true;
+    } catch {
+      return false;
+    }
+  },
+
+  async checkTeamChat(sessionId, token) {
+    const known = () => get().teamChat[sessionId]?.received?.some((receipt) => receipt.token === token) ?? false;
+    const check = `${sessionId}|${token}`;
+    if (known() || get().teamChatUnknown[sessionId]?.includes(token) || teamChatChecks.has(check)) return;
+    teamChatChecks.add(check);
+    try {
+      // The host keeps a receipt before it writes the prompt, so one read
+      // settles it: there, or never written by the host.
+      await get().loadTeamChat(sessionId);
+      if (!known()) set({ teamChatUnknown: { ...get().teamChatUnknown, [sessionId]: [...(get().teamChatUnknown[sessionId] ?? []), token] } });
+    } finally {
+      teamChatChecks.delete(check);
     }
   },
 
@@ -2768,36 +3142,153 @@ export const useStore = create<State>((set, get) => ({
   },
 
   async handOff(sessionId, provider, preset) {
-    const session = get().sessions[sessionId];
-    if (!session) return;
-    const brief = handoffBrief(session.projection.cards, session.snapshot.provider);
-    const team = preset?.combo ?? get().teams[sessionId];
-    let key: string;
-    if (preset) {
-      try {
-        const opened = await api.sessionOpen({
+    if (leaderContinuations.has(sessionId) || quotaContinuationSessions.has(sessionId)) return;
+    leaderContinuations.add(sessionId);
+    let target: SessionHandle | null = null;
+    try {
+      const session = idleHandoffSource(get, sessionId);
+      await validateLeaderSource(get, session);
+      const context = await handoffContext(get, session);
+      const sequence = context.sequence;
+      await validateLeaderSource(get, session, sequence);
+      const team = preset?.combo ?? get().teams[sessionId];
+      const opened = await api.sessionOpen({
           workspaceId: session.workspaceId,
           mode: { mode: "new" },
-          provider: preset.orchestrator.provider,
-          ...(preset.orchestrator.resources ? { resources: preset.orchestrator.resources } : {}),
-          ...(preset.orchestrator.model ? { model: preset.orchestrator.model } : {}),
-          ...(preset.orchestrator.effort ? { reasoningEffort: preset.orchestrator.effort } : {}),
-          combo: preset.combo,
-        });
-        await attachLive(get, set, opened.handle, session.workspaceId, false, opened.localSetup);
-        key = opened.handle.id;
-      } catch (error) {
-        set({ error: asError(error) });
-        return;
+          provider: preset?.orchestrator.provider ?? provider,
+          ...launchDefaults(get().sessionDefaults, preset?.orchestrator.provider ?? provider),
+          ...(preset?.orchestrator.resources ? { resources: preset.orchestrator.resources } : {}),
+          ...(preset?.orchestrator.model ? { model: preset.orchestrator.model } : {}),
+          ...(preset?.orchestrator.effort ? { reasoningEffort: preset.orchestrator.effort } : {}),
+          ...(team ? { combo: team } : {}),
+      });
+      target = opened.handle;
+      await attachLive(get, set, target, session.workspaceId, false, opened.localSetup);
+      await validateLeaderSource(get, session, sequence);
+      const { brief, archive } = await bindArchive(session, get().sessions[target.id], context);
+      const agent = get().sessions[target.id]?.snapshot.agentSessionId;
+      if (agent && session.snapshot.agentSessionId) {
+        await keepPendingBrief(agent, brief);
+        await saveContinuation(get, set, agent, { fromAgentSessionId: session.snapshot.agentSessionId, fromProvider: session.snapshot.provider, target: continuationTarget(get().sessions[target.id]!), briefPending: true, ...(archive ? { archive } : {}) });
       }
-    } else {
-      const opened = await get().openSessionFor(session.workspaceId, provider);
-      if (!opened) return;
-      key = opened.key;
-      if (team) await get().saveTeam(key, team);
+      await validateLeaderSource(get, session, sequence);
+      const key = target.id;
+      set({ drafts: { ...get().drafts, [key]: t("Continue from where the previous session stopped.") }, sideBrief: { ...get().sideBrief, [key]: brief }, ...(team ? { teams: { ...get().teams, [key]: team } } : {}), error: null });
+      target = null;
+      get().selectSession(key);
+    } catch (error) {
+      if (target) await discardContinuation(get, set, target);
+      set({ error: asError(error) });
+    } finally {
+      leaderContinuations.delete(sessionId);
     }
-    set({ drafts: { ...get().drafts, [key]: brief } });
-    get().selectSession(key);
+  },
+
+  async prepareQuotaContinuation(sessionId, target) {
+    if (leaderContinuations.has(sessionId) || quotaContinuationSessions.has(sessionId) || quotaContinuationProviders.has(target.provider)) return null;
+    quotaContinuationSessions.add(sessionId);
+    quotaContinuationProviders.add(target.provider);
+    let opened: SessionHandle | null = null;
+    function refuse(message: string): never { throw { code: "NOT_READY", message, retry: "user_action" }; }
+    const checkSource = () => {
+      const session = get().sessions[sessionId];
+      if (!session || session.projection.attachment !== "attached" || session.projection.process === "exited") refuse(t("The source session changed while the continuation was opening. Try again."));
+      if (!session!.projection.quotaFailure) refuse(t("This session has not reported an exhausted usage limit."));
+      const projection = session!.projection;
+      if (session!.inFlightRequestId || session!.pendingPrompt || session!.steerInFlight
+        || ["running", "awaiting_user", "cancelling"].includes(projection.foreground)
+        || projection.autonomous.size > 0
+        || [...projection.detached.values()].some((state) => state === "active" || state === "cancellation_requested")
+        || [...projection.background.values()].some((task) => task.state === "running")
+        || [...projection.inspector.agents.values()].some((agent) => agent.status === "working" || agent.status === "starting")
+        || (get().jobs[sessionId] ?? []).some((job) => ["starting", "running", "waiting"].includes(job.status))) refuse(t("Wait for this session and its workers to finish before preparing a continuation."));
+      if (projection.queue.items.length || projection.queue.sending) refuse(t("Resolve or remove the queued messages before preparing a continuation."));
+      const goal = get().odyssey[sessionId]?.goal;
+      if (goal && goal.state !== "complete" && goal.state !== "abandoned") refuse(t("Move this goal from the Big Thing tab so its progress follows it."));
+      return session!;
+    };
+    const checkSnapshot = (snapshot: Snapshot) => {
+      if (["running", "awaiting_user", "cancelling"].includes(snapshot.foreground) || snapshot.autonomousTurns.length
+        || Object.values(snapshot.detachedCalls).some((state) => state === "active" || state === "cancellation_requested")
+        || snapshot.backgroundTasks?.some((task) => task.state === "running")) refuse(t("Wait for this session and its workers to finish before preparing a continuation."));
+      if (snapshot.queue?.items.length || snapshot.queue?.sending) refuse(t("Resolve or remove the queued messages before preparing a continuation."));
+    };
+    try {
+      const source = checkSource();
+      const sourceAgent = source.snapshot.agentSessionId;
+      if (!sourceAgent || !ACCOUNT_PROVIDERS.includes(target.provider)) refuse(t("Choose another signed-in account or provider."));
+      const [accounts, snapshot, jobs, combo, goal] = await Promise.all([
+        api.accountsList(target.provider), api.sessionSnapshot(source.handle), api.delegationJobs(source.handle),
+        api.delegationComboGet(source.handle), api.odysseyForSession(source.workspaceId, sourceAgent!),
+      ]);
+      checkSource();
+      checkSnapshot(snapshot);
+      if (jobs.some((job) => ["starting", "running", "waiting"].includes(job.status))) refuse(t("Wait for this session and its workers to finish before preparing a continuation."));
+      if (goal && goal.goal.state !== "complete" && goal.goal.state !== "abandoned") refuse(t("Move this goal from the Big Thing tab so its progress follows it."));
+      const account = target.accountId ? accounts.find((entry) => entry.id === target.accountId) : accounts.find((entry) => entry.active);
+      const provider = get().providers?.find((entry) => entry.provider === target.provider);
+      if (!provider?.resolved || !account || account.provider !== target.provider || account.auth?.loggedIn !== true || account.auth.setupRequired
+        || (snapshot.provider === target.provider && (snapshot.accountId ?? "default") === account.id)) refuse(t("Choose another signed-in account or provider."));
+      const options = asConfigOptions(source.projection.configOptions ?? source.snapshot.configOptions);
+      const configValue = (id: string) => {
+        const value = options.find((option) => option.configId === id)?.currentValue;
+        return typeof value === "string" && value !== "default" ? value : undefined;
+      };
+      const model = snapshot.provider === target.provider ? configValue("model") : undefined;
+      const effort = snapshot.provider === target.provider ? options.find((option) => isEffortOption(option.configId))?.currentValue : undefined;
+      const response = await api.sessionOpen({
+        workspaceId: source.workspaceId, mode: { mode: "new" }, provider: target.provider, accountId: account.id,
+        ...launchDefaults(get().sessionDefaults, target.provider),
+        ...(model ? { model } : {}), ...(typeof effort === "string" ? { reasoningEffort: effort } : {}), combo: combo ?? EMPTY_COMBO,
+      });
+      opened = response.handle;
+      // An older host must not silently ignore the selected account.
+      if (response.snapshot.provider !== target.provider || response.snapshot.accountId !== account.id) refuse(t("Choose another signed-in account or provider."));
+      await attachLive(get, set, opened, source.workspaceId, false, response.localSetup);
+      const current = checkSource();
+      checkSnapshot(await api.sessionSnapshot(source.handle));
+      checkSource();
+      const destination = get().sessions[opened.id];
+      if (!destination?.snapshot.agentSessionId || destination.snapshot.accountId !== account.id) refuse(t("The source session changed while the continuation was opening. Try again."));
+      const context = await handoffContext(get, current, 24_000);
+      const sequence = context.sequence;
+      checkSource();
+      const { brief, archive } = await bindArchive(source, destination, context);
+      const continuation: Continuation = { fromAgentSessionId: sourceAgent!, fromProvider: snapshot.provider, target: continuationTarget(destination), briefPending: true, ...(archive ? { archive } : {}) };
+      const destinationAgent = destination.snapshot.agentSessionId;
+      await keepPendingBrief(destinationAgent, brief);
+      await saveContinuation(get, set, destinationAgent, continuation);
+      // Copy the latest composer state, including edits made during startup.
+      checkSource();
+      await validateLeaderSource(get, source, sequence);
+      set({
+        drafts: { ...get().drafts, [opened.id]: get().drafts[sessionId]?.length ? get().drafts[sessionId]! : t("Continue from where the previous session stopped.") },
+        attachments: { ...get().attachments, [opened.id]: [...(get().attachments[sessionId] ?? [])] },
+        mentions: { ...get().mentions, [opened.id]: [...(get().mentions[sessionId] ?? [])] },
+        teams: { ...get().teams, [opened.id]: combo ?? EMPTY_COMBO },
+        sideBrief: { ...get().sideBrief, [opened.id]: brief },
+        continuations: { ...get().continuations, [destinationAgent]: continuation },
+        continuationHistory: { ...get().continuationHistory, [opened.id]: [...current.projection.cards] }, error: null,
+      });
+      const key = opened.id;
+      opened = null;
+      get().selectSession(key);
+      void get().renameSession(source.workspaceId, destinationAgent, sessionTitle(current));
+      return key;
+    } catch (error) {
+      if (opened) {
+        try {
+          await api.sessionStop(opened);
+          const { [opened.id]: _unused, ...sessions } = get().sessions;
+          set({ sessions, sessionOrder: get().sessionOrder.filter((key) => key !== opened!.id) });
+        } catch { /* Leave a target that could not be stopped visible. The source is untouched. */ }
+      }
+      set({ error: asError(error) });
+      return null;
+    } finally {
+      quotaContinuationSessions.delete(sessionId);
+      quotaContinuationProviders.delete(target.provider);
+    }
   },
 
   async forkSession(source, point, how) {
@@ -2892,19 +3383,24 @@ export const useStore = create<State>((set, get) => ({
 
   setPendingProvider(sessionId, pending) {
     const { [sessionId]: _previous, ...rest } = get().pendingProvider;
-    set({ pendingProvider: pending && switchesSession(get().sessions[sessionId], pending) ? { ...rest, [sessionId]: pending } : rest });
+    set({ pendingProvider: pending && switchesSession(get().sessions[sessionId], pending, get().teams[sessionId]) ? { ...rest, [sessionId]: pending } : rest });
   },
 
   async loadContinuations() {
     try {
       const stored = await api.prefGet<Record<string, Continuation>>(CONTINUATIONS_KEY);
-      if (stored && typeof stored === "object") set({ continuations: stored });
+      if (stored && typeof stored === "object") {
+        set({ continuations: stored });
+        // Sessions attached before the records arrived get their waiting brief now.
+        for (const key of Object.keys(get().sessions)) void restorePendingBrief(get, set, key);
+      }
     } catch {
       // None yet.
     }
   },
 
   async continueOnProvider(sessionId) {
+    if (leaderContinuations.has(sessionId) || quotaContinuationSessions.has(sessionId)) return;
     const session = get().sessions[sessionId];
     const pending = get().pendingProvider[sessionId];
     const draft = get().drafts[sessionId] ?? "";
@@ -2917,15 +3413,22 @@ export const useStore = create<State>((set, get) => ({
     const team = get().teams[sessionId];
     // Nothing said yet: nothing to hand off. The session simply starts on
     // the chosen provider with the person's message.
-    const fresh = !hasConversation(session.projection.cards);
+    const fresh = !hasConversation(session.projection.cards) && !get().sideBrief[sessionId]
+      && !sessionContinuation(session, get().continuations);
     const provider = PROVIDER_LABELS[pending.provider];
     // The model the chip shows when none was picked: the provider's default,
     // else its first. Local Models has no account default to fall back on.
     const catalog = get().providerModels[pending.provider] ?? [];
     const shownModel = pending.model ?? (catalog.find((entry) => entry.isDefault) ?? catalog[0])?.id;
     const model = pending.provider === "local" ? shownModel : pending.model;
+    leaderContinuations.add(sessionId);
+    let target: SessionHandle | null = null;
+    let submitStarted = false;
     set({ busy: fresh ? t("Starting with {provider}", { provider }) : t("Continuing with {provider}", { provider }), error: null });
     try {
+      await validateLeaderSource(get, session);
+      const context = fresh ? undefined : await handoffContext(get, session);
+      await validateLeaderSource(get, session, context?.sequence);
       const opened = await api.sessionOpen({
         workspaceId: session.workspaceId,
         mode: { mode: "new" },
@@ -2936,63 +3439,102 @@ export const useStore = create<State>((set, get) => ({
         ...(pending.effort ? { reasoningEffort: pending.effort } : {}),
         ...(team ? { combo: team } : {}),
       });
+      target = opened.handle;
       await attachLive(get, set, opened.handle, session.workspaceId, false, opened.localSetup);
       const key = opened.handle.id;
       const live = get().sessions[key];
       const agentSessionId = live?.snapshot.agentSessionId ?? opened.snapshot.agentSessionId ?? null;
+      await validateLeaderSource(get, session, context?.sequence);
+      const bound = context ? await bindArchive(session, live, context) : undefined;
+      await validateLeaderSource(get, session, context?.sequence);
+      if (!fresh && agentSessionId && fromAgentSessionId) {
+        await saveContinuation(get, set, agentSessionId, { fromAgentSessionId, fromProvider: from, target: continuationTarget(live!), ...(bound?.archive ? { archive: bound.archive } : {}) });
+      }
+      await validateLeaderSource(get, session, context?.sequence);
       // The brief rides in front of the person's message; the transcript
       // shows only the message (see withoutHandoff).
-      const prompt = fresh ? draft : `${handoffBrief(session.projection.cards, from)}${HANDOFF_SPLIT}${draft}`;
+      const prompt = bound ? `${bound.brief}${HANDOFF_SPLIT}${draft}` : draft;
+      submitStarted = true;
       const response = await api.sessionSubmit(opened.handle, crypto.randomUUID(), prompt, attachments.map((a) => a.id), mentions);
       if (response.outcome.outcome !== "accepted") {
         // Nothing changes for the person: the draft stays, and the session
         // opened for it goes away.
-        await api.sessionStop(opened.handle).catch(() => undefined);
-        const { [key]: _unused, ...kept } = get().sessions;
-        set({ sessions: kept, sessionOrder: get().sessionOrder.filter((id) => id !== key), error: response.outcome.error });
+        await discardContinuation(get, set, opened.handle);
+        target = null;
+        set({ error: response.outcome.error });
         return;
       }
+      target = null; // Accepted work must stay visible, even if later housekeeping fails.
+      const composerUnchanged = (get().drafts[sessionId] ?? "") === draft
+        && JSON.stringify(get().attachments[sessionId] ?? []) === JSON.stringify(attachments)
+        && JSON.stringify(get().mentions[sessionId] ?? []) === JSON.stringify(mentions);
       const { [sessionId]: _done, ...pendingRest } = get().pendingProvider;
       set({
-        drafts: { ...get().drafts, [sessionId]: "" },
-        attachments: { ...get().attachments, [sessionId]: [] },
-        mentions: { ...get().mentions, [sessionId]: [] },
+        ...(composerUnchanged ? {
+          drafts: { ...get().drafts, [sessionId]: "" },
+          attachments: { ...get().attachments, [sessionId]: [] },
+          mentions: { ...get().mentions, [sessionId]: [] },
+        } : {}),
         pendingProvider: pendingRest,
         ...(fresh ? {} : { continuationHistory: { ...get().continuationHistory, [key]: session.projection.cards } }),
       });
       if (!fresh && agentSessionId && fromAgentSessionId) {
-        const continuations = { ...get().continuations, [agentSessionId]: { fromAgentSessionId, fromProvider: from } };
-        set({ continuations });
-        void api.prefSet(CONTINUATIONS_KEY, continuations).catch(() => undefined);
         // One conversation in the list: the new session keeps the title,
         // and the earlier one is archived (still there among archived).
         await get().renameSession(session.workspaceId, agentSessionId, title);
       }
       get().selectSession(key);
-      if (fromAgentSessionId) {
+      if (fromAgentSessionId && composerUnchanged) {
         await api.sessionStop(session.handle).catch(() => undefined);
         const { [sessionId]: _stopped, ...rest } = get().sessions;
         set({ sessions: rest, sessionOrder: get().sessionOrder.filter((id) => id !== sessionId) });
         await get().archiveSession(session.workspaceId, fromAgentSessionId, true);
       }
     } catch (error) {
+      // An IPC error after submit may have accepted work. Leave that target
+      // visible and keep the source; durable outbox reconciliation owns it.
+      if (target && !submitStarted) await discardContinuation(get, set, target);
       set({ error: asError(error) });
     } finally {
+      leaderContinuations.delete(sessionId);
       set({ busy: null });
     }
   },
 
   async loadTeamPresets() {
     try {
-      const [presets, defaultId] = await Promise.all([api.prefGet<unknown>(TEAM_PRESETS_KEY), api.prefGet<string>(DEFAULT_PRESET_KEY)]);
-      const list = readPresets(presets);
-      set({ teamPresets: list, defaultPresetId: null });
-      // New sessions no longer start on a team: a default left from before
-      // is cleared, with the host's default workers it implied.
+      const previousProjectTeams = get().projectTeamPresetIds;
+      const [presets, defaultId, savedProjectTeams] = await Promise.all([
+        api.prefGet<unknown>(TEAM_PRESETS_KEY),
+        api.prefGet<string>(DEFAULT_PRESET_KEY),
+        api.prefGet<unknown>(PROJECT_TEAM_PRESETS_KEY).catch(() => undefined),
+      ]);
+      const projectTeams = savedProjectTeams && typeof savedProjectTeams === "object" && !Array.isArray(savedProjectTeams)
+        ? Object.fromEntries(Object.entries(savedProjectTeams).filter((entry): entry is [string, string] => typeof entry[1] === "string"))
+        : {};
+      set((state) => ({
+        teamPresets: readPresets(presets),
+        defaultPresetId: null,
+        ...(savedProjectTeams !== undefined && state.projectTeamPresetIds === previousProjectTeams ? { projectTeamPresetIds: projectTeams } : {}),
+      }));
+      // Clear the older global default and the host's default workers it implied.
       if (typeof defaultId === "string" && defaultId) void get().setDefaultPreset(null);
     } catch {
       // No presets yet.
     }
+  },
+
+  setProjectTeamPreset(workspaceId, presetId) {
+    // Each write starts from the last saved map, including changes to other projects.
+    projectTeamWrite = projectTeamWrite.then(async () => {
+      const projectTeamPresetIds = { ...get().projectTeamPresetIds };
+      if (presetId === null) delete projectTeamPresetIds[workspaceId];
+      else if (get().teamPresets.some((preset) => preset.id === presetId)) projectTeamPresetIds[workspaceId] = presetId;
+      else return;
+      await api.prefSet(PROJECT_TEAM_PRESETS_KEY, projectTeamPresetIds);
+      set({ projectTeamPresetIds });
+    }).catch((error) => set({ error: asError(error) }));
+    return projectTeamWrite;
   },
 
   async saveTeamPreset(preset) {
@@ -3085,7 +3627,7 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
-  async openSessionWithPreset(workspaceId, preset, message) {
+  async openSessionWithPreset(workspaceId, preset, message, attachments) {
     const { provider, model, effort, resources } = preset.orchestrator;
     await get().openSession(workspaceId, { mode: "new" }, provider, {
       ...(model ? { model } : {}),
@@ -3093,13 +3635,14 @@ export const useStore = create<State>((set, get) => ({
       combo: preset.combo,
       ...(resources ? { resources } : {}),
       ...(message ? { message } : {}),
+      ...(attachments?.length ? { attachments } : {}),
     });
   },
 
   async applyPresetToSession(sessionId, preset) {
     const session = get().sessions[sessionId];
     if (!session) return "applied";
-    if (switchesSession(session, preset.orchestrator)) return "needs_handoff";
+    if (switchesSession(session, preset.orchestrator, preset.combo)) return "needs_handoff";
     await get().saveTeam(sessionId, preset.combo);
     const options = asConfigOptions(session.snapshot.configOptions);
     const model = options.find((option) => option.configId === "model");
@@ -3125,8 +3668,9 @@ export const useStore = create<State>((set, get) => ({
   },
 
   async send(sessionId) {
+    if (leaderContinuations.has(sessionId) || quotaContinuationSessions.has(sessionId)) return;
     const pending = get().pendingProvider[sessionId];
-    if (pending && switchesSession(get().sessions[sessionId], pending)) return get().continueOnProvider(sessionId);
+    if (pending && switchesSession(get().sessions[sessionId], pending, get().teams[sessionId])) return get().continueOnProvider(sessionId);
     const session = get().sessions[sessionId];
     const draft = get().drafts[sessionId] ?? "";
     const attachments = get().attachments[sessionId] ?? [];
@@ -3155,6 +3699,7 @@ export const useStore = create<State>((set, get) => ({
         if (brief) {
           const { [sessionId]: _sent, ...rest } = get().sideBrief;
           set({ sideBrief: rest });
+          consumeContinuationBrief(get, set, sessionId);
         }
         reportsSent(get, set, session.snapshot.agentSessionId);
         const current = get().sessions[sessionId];
@@ -3172,6 +3717,7 @@ export const useStore = create<State>((set, get) => ({
   },
 
   async steer(sessionId) {
+    if (leaderContinuations.has(sessionId) || quotaContinuationSessions.has(sessionId)) return;
     const session = get().sessions[sessionId];
     const draft = get().drafts[sessionId] ?? "";
     if (!session || !draft.trim() || session.steerInFlight) return;
@@ -3189,6 +3735,7 @@ export const useStore = create<State>((set, get) => ({
   },
 
   async enqueue(sessionId) {
+    if (leaderContinuations.has(sessionId) || quotaContinuationSessions.has(sessionId)) return;
     const session = get().sessions[sessionId];
     const draft = get().drafts[sessionId] ?? "";
     const attachments = get().attachments[sessionId] ?? [];
@@ -3207,10 +3754,14 @@ export const useStore = create<State>((set, get) => ({
       // The composer's own state rides along, so taking the prompt back out
       // to edit restores its chips too, from this window or the phone.
       const brief = get().sideBrief[sessionId];
-      await api.sessionEnqueue(session.handle, requestId, brief ? `${brief}${HANDOFF_SPLIT}${draft}` : draft, attachments.map((a) => a.id), mentions, { attachments, mentions });
+      const restoreAttachments = attachments.map((attachment) => attachment.document
+        ? { ...attachment, document: { ...attachment.document, text: "" } }
+        : attachment);
+      await api.sessionEnqueue(session.handle, requestId, brief ? `${brief}${HANDOFF_SPLIT}${draft}` : draft, attachments.map((a) => a.id), mentions, { attachments: restoreAttachments, mentions });
       if (brief) {
         const { [sessionId]: _sent, ...rest } = get().sideBrief;
         set({ sideBrief: rest });
+        consumeContinuationBrief(get, set, sessionId);
       }
       reportsSent(get, set, session.snapshot.agentSessionId);
       const current = get().sessions[sessionId];
@@ -3495,7 +4046,9 @@ export const useStore = create<State>((set, get) => ({
     } finally {
       set({ busy: null });
     }
-    await get().openSession(session.workspaceId, { mode: "resume", session_id: agentSessionId }, provider);
+    // Named, because a session that was pinned to an account would otherwise
+    // be reopened on that one again.
+    await get().openSession(session.workspaceId, { mode: "resume", session_id: agentSessionId }, provider, { accountId: id });
   },
 
   async finishGeminiSignIn() {

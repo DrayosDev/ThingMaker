@@ -18,11 +18,13 @@ import { emptyProjection } from "./projection";
 import { HANDOFF_SPLIT, withoutHandoff } from "./team";
 
 const snapshot = (id: string, provider: string) =>
-  ({ handle: { id, attachmentGeneration: "1" }, agentSessionId: `agent-${id}`, provider, toolCalls: {}, foreground: "idle" }) as unknown as Snapshot;
+  ({ handle: { id, attachmentGeneration: "1" }, agentSessionId: `agent-${id}`, provider, accountId: "default", process: "ready", attachment: "attached", toolCalls: {}, foreground: "idle", autonomousTurns: [], detachedCalls: {}, lastSequence: "0", historyDropped: 0 }) as unknown as Snapshot;
 
 function live(id: string): LiveSession {
   const handle = { id, attachmentGeneration: "1" };
   const projection = emptyProjection();
+  projection.attachment = "attached";
+  projection.process = "ready";
   projection.cards = [{ kind: "message", key: "u1", message: { key: "u1", role: "user", messageId: "u1", blocks: [{ type: "text", text: "Fix the login bug" }], contentUnknown: false } }];
   return {
     handle, workspaceId: "w1", snapshot: snapshot(id, "claude"), projection, inFlightRequestId: null, steerInFlight: false,
@@ -39,11 +41,14 @@ beforeEach(() => {
   archiveSession.mockClear();
   useStore.setState({
     sessions: { old: live("old") }, sessionOrder: ["old"], drafts: { old: "Now add a test" }, attachments: {}, mentions: {},
-    pendingProvider: {}, continuations: {}, continuationHistory: {}, teams: {}, view: { kind: "session", sessionId: "old" },
+    pendingProvider: {}, continuations: {}, continuationHistory: {}, sideBrief: {}, teams: {}, view: { kind: "session", sessionId: "old" },
+    uiPrefs: { ...useStore.getState().uiPrefs, autoContinuity: false },
     renameSession, archiveSession, loadOdyssey: vi.fn(async () => undefined), loadTeam: vi.fn(async () => undefined),
   } as never);
   vi.mocked(api.sessionOpen).mockResolvedValue({ handle: { id: "new", attachmentGeneration: "1" }, snapshot: snapshot("new", "codex") } as never);
-  vi.mocked(api.sessionSnapshot).mockResolvedValue(snapshot("new", "codex"));
+  vi.mocked(api.sessionSnapshot).mockImplementation(async (handle) => snapshot(handle.id, handle.id === "old" ? "claude" : "codex"));
+  vi.mocked(api.delegationJobs).mockResolvedValue([]);
+  vi.mocked(api.odysseyForSession).mockResolvedValue(null);
   vi.mocked(api.sessionHistory).mockResolvedValue([] as never);
   vi.mocked(api.sessionSubmit).mockResolvedValue({ outcome: { outcome: "accepted" } } as never);
 });
@@ -71,7 +76,7 @@ it("moves to the new provider only when the message is sent", async () => {
   expect(state.sessions.old).toBeUndefined();
   expect(state.view).toEqual(expect.objectContaining({ kind: "session", sessionId: "new" }));
   expect(state.pendingProvider.old).toBeUndefined();
-  expect(state.continuations["agent-new"]).toEqual({ fromAgentSessionId: "agent-old", fromProvider: "claude" });
+  expect(state.continuations["agent-new"]).toEqual({ fromAgentSessionId: "agent-old", fromProvider: "claude", target: { workspaceId: "w1", provider: "codex", accountId: "default" } });
   expect(state.continuationHistory.new).toHaveLength(1);
   expect(api.sessionStop).toHaveBeenCalledWith({ id: "old", attachmentGeneration: "1" });
   expect(archiveSession).toHaveBeenCalledWith("w1", "agent-old", true);
