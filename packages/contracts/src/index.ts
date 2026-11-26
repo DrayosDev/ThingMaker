@@ -1650,8 +1650,13 @@ export type UiPrefs = {
   autoContinuity?: boolean;
 };
 
-/** An immutable Markdown context snapshot in ThingMaker's private data directory. */
-export type ContinuityArchive = { id: string; path: string; bytes: number; createdAtUnixMs: number };
+/**
+ * One session's visible conversation, saved as immutable Markdown in
+ * ThingMaker's private data directory when its work moved to another leader.
+ * `parent` is the archive that session was itself handed, when it was a
+ * continuation: a line of hand-offs is read link by link, never copied.
+ */
+export type ContinuityArchive = { id: string; path: string; bytes: number; createdAtUnixMs: number; chars?: number; provider?: Provider; parent?: string | null };
 /** Character offsets count Unicode code points, matching the team reader. */
 export type ContinuityPage = { archive: ContinuityArchive; text: string; nextOffset: number | null; totalChars: number };
 

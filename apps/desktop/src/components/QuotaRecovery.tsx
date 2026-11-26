@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ACCOUNT_PROVIDERS, PROVIDER_LABELS, type Provider } from "@thingmaker/contracts";
 import { useStore } from "../store";
+import { IS_REMOTE } from "../remote/mode";
 import { t } from "../i18n";
 import { accountName } from "./ProviderAccounts";
 
@@ -30,7 +31,9 @@ export function QuotaRecovery({ sessionId }: { sessionId: string }) {
     for (const provider of ACCOUNT_PROVIDERS) void loadAccounts(provider);
   }, [open, exhausted, loadAccounts]);
 
-  if (!session || !exhausted) return null;
+  // Choosing which account is spent is the computer's: the phone can neither
+  // list the accounts nor open a session on one.
+  if (!session || !exhausted || IS_REMOTE) return null;
   const source = session.snapshot.provider;
   const active = ["running", "awaiting_user", "cancelling"].includes(session.projection.foreground) || Boolean(session.inFlightRequestId);
   const targets: Array<{ key: string; provider: Provider; accountId?: string; label: string; disabled: boolean }> = [];
@@ -84,7 +87,7 @@ export function QuotaRecovery({ sessionId }: { sessionId: string }) {
             </select>
           </label>
           {!targets.some((entry) => !entry.disabled) && <p className="small">{t("Sign in to another account in Providers to continue here.")}</p>}
-          <p className="small muted">{autoContinuity ? t("The new session receives a recent excerpt and can read the private archive of available history. Your draft stays editable; nothing is sent until you send it.") : t("The new session receives a limited summary of the conversation. Your draft stays editable; nothing is sent until you send it.")}</p>
+          <p className="small muted">{autoContinuity ? t("The new session receives a recent excerpt and can consult the private archive of the earlier conversation. Your draft stays editable; nothing is sent until you send it.") : t("The new session receives a limited summary of the conversation. Your draft stays editable; nothing is sent until you send it.")}</p>
           {active && <p className="small">{t("Wait for the running turn to finish.")}</p>}
           <button className="button button-primary button-small" disabled={!target || working || active} onClick={() => void choose()} type="button">
             {working ? t("Preparing continuation…") : t("Prepare continuation")}

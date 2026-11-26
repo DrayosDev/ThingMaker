@@ -262,10 +262,8 @@ export const logic: Record<string, string> = {
   "{harness} · default": "{harness} · predeterminado",
   "Continuity archive": "Archivo de continuidad",
   "Private continuity archive available": "Archivo privado de continuidad disponible",
-  "The new leader can read available visible history in pages. Hidden reasoning, binary files and unsent drafts are excluded.": "El nuevo líder puede leer por páginas el historial visible disponible. Se excluyen el razonamiento oculto, los archivos binarios y los borradores sin enviar.",
   "Archive location": "Ubicación del archivo",
+  "The new leader can consult the earlier visible conversation a page at a time. Hidden reasoning, binary files and unsent drafts are not in it.": "El nuevo líder puede consultar la conversación visible anterior página a página. No incluye el razonamiento oculto, los archivos binarios ni los borradores sin enviar.",
+  "The new session receives a recent excerpt and can consult the private archive of the earlier conversation. Your draft stays editable; nothing is sent until you send it.": "La nueva sesión recibe un extracto reciente y puede consultar el archivo privado de la conversación anterior. Tu borrador sigue editable; no se envía nada hasta que lo envíes tú.",
   "Export continuity…": "Exportar continuidad…",
-  "The new session receives a recent excerpt and can read the private archive of available history. Your draft stays editable; nothing is sent until you send it.": "La nueva sesión recibe un extracto reciente y puede leer el archivo privado del historial disponible. Tu borrador sigue editable; no se envía nada hasta que lo envíes tú.",
-  "Save private Markdown before changing leader or provider, including quota continuation. Automatic continuity needs an agent with tools; turn it off to continue in Local Chat with a limited excerpt.": "Guarda Markdown privado antes de cambiar de líder o proveedor, también al continuar por límite de cuota. La continuidad automática necesita un agente con herramientas; desactívala para continuar en Local Chat con un extracto limitado.",
-  "Automatic continuity needs an agent with tools. Choose a local agent, or turn off automatic continuity in Settings to continue with a limited excerpt in Local Chat.": "La continuidad automática necesita un agente con herramientas. Elige un agente local o desactiva la continuidad automática en Ajustes para continuar en Local Chat con un extracto limitado.",
 };

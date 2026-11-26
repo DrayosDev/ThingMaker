@@ -43,7 +43,7 @@ it("exports by keyboard and disables repeat actions while busy", async () => {
 it("describes archive or limited summary according to the preference", () => {
   const { rerender } = render(<QuotaRecovery sessionId="s" />);
   fireEvent.click(screen.getByRole("button", { name: "Continue with another account or provider" }));
-  expect(screen.getByText(/recent excerpt and can read the private archive/)).toBeTruthy();
+  expect(screen.getByText(/recent excerpt and can consult the private archive/)).toBeTruthy();
   useStore.setState({ uiPrefs: { autoContinuity: false } } as never);
   rerender(<QuotaRecovery sessionId="s" />);
   expect(screen.getByText(/receives a limited summary/)).toBeTruthy();

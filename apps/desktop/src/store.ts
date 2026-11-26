@@ -704,23 +704,63 @@ function continuationTarget(session: LiveSession) {
 }
 
 const CONTINUATIONS_KEY = "session_continuations";
+/** Continuations kept: years of them, and well inside what one preference may hold. */
+const CONTINUATIONS_KEPT = 300;
 const quotaContinuationSessions = new Set<string>();
 const quotaContinuationProviders = new Set<Provider>();
 const leaderContinuations = new Set<string>();
 let continuationWrites: Promise<unknown> = Promise.resolve();
 
+/**
+ * Records that a session carries on another's. The record is a convenience
+ * (the link back, the archive's notice), kept in one preference with every
+ * other continuation: a write that fails, as one over the preference size
+ * limit does, must not undo a change of leader that has otherwise worked. So
+ * the record is kept in memory at once and the write is not waited on to
+ * succeed.
+ */
 function saveContinuation(get: Get, set: Set, agent: string, entry: Continuation): Promise<void> {
-  const write = continuationWrites.catch(() => undefined).then(async () => {
-    await api.prefSet(CONTINUATIONS_KEY, { ...get().continuations, [agent]: entry });
-    set({ continuations: { ...get().continuations, [agent]: entry } });
-  });
+  const { [agent]: _replaced, ...others } = get().continuations;
+  // Newest last; the oldest go once there are more than are kept.
+  const kept = Object.entries({ ...others, [agent]: entry }).slice(-CONTINUATIONS_KEPT);
+  set({ continuations: Object.fromEntries(kept) });
+  const write = continuationWrites.catch(() => undefined).then(() => api.prefSet(CONTINUATIONS_KEY, get().continuations)).then(() => undefined, () => undefined);
   continuationWrites = write;
   return write;
 }
 
+/**
+ * Where a prepared continuation's brief waits until its first message is
+ * sent: a preference of its own per session. A brief runs to tens of
+ * kilobytes, and kept inside the map of continuations a handful of unsent
+ * ones filled the 256 KiB a preference may hold, after which no continuation
+ * could be recorded at all.
+ */
+const pendingBriefKey = (agent: string) => `continuation_brief:${agent}`;
+
+/** Keeps a prepared brief for after a restart. Losing it costs only that. */
+async function keepPendingBrief(agent: string, brief: string): Promise<void> {
+  await api.prefSet(pendingBriefKey(agent), brief).catch(() => undefined);
+}
+
+/** Puts a waiting brief back in front of a continuation's first message. */
+async function restorePendingBrief(get: Get, set: Set, sessionId: string): Promise<void> {
+  const waiting = () => {
+    const session = get().sessions[sessionId];
+    const entry = sessionContinuation(session, get().continuations);
+    return entry?.briefPending && !get().sideBrief[sessionId] ? session?.snapshot.agentSessionId ?? null : null;
+  };
+  const agent = waiting();
+  if (!agent) return;
+  const brief = await api.prefGet<string>(pendingBriefKey(agent)).catch(() => null);
+  // Sent, or replaced, while it was being read.
+  if (typeof brief !== "string" || !brief || waiting() !== agent) return;
+  set({ sideBrief: { ...get().sideBrief, [sessionId]: brief } });
+}
+
 /** Freeze the exposed conversation, then recover retained events still waiting
- * for the renderer. Never put drafts or queued prompts in the archive. */
-async function saveContinuity(get: Get, session: LiveSession): Promise<{ archive: ContinuityArchive; sequence: string }> {
+ * for the renderer. Never put drafts or queued prompts in the document. */
+async function continuityDocument(get: Get, session: LiveSession): Promise<{ markdown: string; sequence: string }> {
   const projection = structuredClone(session.projection);
   const snapshot = await api.sessionSnapshot(session.handle);
   if (!snapshot.agentSessionId || snapshot.agentSessionId !== session.snapshot.agentSessionId) throw new Error("Cannot read continuity state without a stable native session ID.");
@@ -745,19 +785,53 @@ async function saveContinuity(get: Get, session: LiveSession): Promise<{ archive
     workspacePath: workspace?.displayPath ?? workspace?.canonicalRoot ?? session.workspaceId,
     projection, ...(get().teams[session.handle.id] ? { team: get().teams[session.handle.id]! } : {}), goal, jobs,
   });
-  const archive = await api.continuitySave(session.handle, warnings.length ? `> Context availability warnings\n> ${warnings.join("\n> ")}\n\n${markdown}` : markdown);
-  return { archive, sequence: snapshot.lastSequence };
+  return { markdown: warnings.length ? `> Context availability warnings\n> ${warnings.join("\n> ")}\n\n${markdown}` : markdown, sequence: snapshot.lastSequence };
 }
 
-async function leaderBrief(get: Get, session: LiveSession, budget = 6000): Promise<{ brief: string; archive?: ContinuityArchive; sequence?: string }> {
+/** What a change of leader carries from the session being left. */
+type HandoffContext = { excerpt: string; archive?: ContinuityArchive; sequence?: string };
+
+/**
+ * The recent excerpt and, when archives are kept, the session's visible
+ * conversation saved for the new leader to consult.
+ *
+ * The archive is an extra. When it cannot be made (the conversation is over
+ * the archive's size limit, the storage refused, the session has no durable
+ * id yet) the excerpt goes alone, as it did before archives existed, rather
+ * than the change of leader failing. A phone never makes one: archives are
+ * written on the computer, by the computer's own interface.
+ */
+async function handoffContext(get: Get, session: LiveSession, budget = 6000): Promise<HandoffContext> {
   const excerpt = get().sideBrief[session.handle.id] ?? handoffBrief(session.projection.cards, session.snapshot.provider, budget);
-  if (get().uiPrefs.autoContinuity === false) return { brief: excerpt };
-  const { archive, sequence } = await saveContinuity(get, session);
-  return { brief: continuityBrief(excerpt, archive), archive, sequence };
+  if (get().uiPrefs.autoContinuity === false || IS_REMOTE) return { excerpt };
+  try {
+    const { markdown, sequence } = await continuityDocument(get, session);
+    return { excerpt, archive: await api.continuitySave(session.handle, markdown), sequence };
+  } catch {
+    return { excerpt };
+  }
 }
 
-function requireContinuityReader(snapshot: Snapshot) {
-  if (isLocalChat(snapshot)) throw { code: "UNSUPPORTED", message: t("Automatic continuity needs an agent with tools. Choose a local agent, or turn off automatic continuity in Settings to continue with a limited excerpt in Local Chat."), retry: "user_action" };
+/** Whether a session has the tool an archive is read with. */
+function readsArchives(snapshot: Snapshot): boolean {
+  return !isLocalChat(snapshot) && snapshot.leadsTeam !== false;
+}
+
+/**
+ * Binds the archive to the session taking over, and words that session's
+ * brief. A session with no way to read one (a local chat, or any session
+ * without the team tools) gets the excerpt alone, and so does one the
+ * archive could not be bound to: the change of leader goes ahead either way.
+ */
+async function bindArchive(source: LiveSession, target: LiveSession | undefined, context: HandoffContext): Promise<{ brief: string; archive?: ContinuityArchive }> {
+  const { excerpt, archive } = context;
+  if (!archive || !target || !readsArchives(target.snapshot)) return { brief: excerpt };
+  try {
+    await api.continuityAttach(source.handle, target.handle, archive.id);
+    return { brief: continuityBrief(excerpt, archive), archive };
+  } catch {
+    return { brief: excerpt };
+  }
 }
 
 function idleHandoffSource(get: Get, sessionId: string): LiveSession {
@@ -813,11 +887,10 @@ async function discardContinuation(get: Get, set: Set, handle: SessionHandle) {
 function consumeContinuationBrief(get: Get, set: Set, sessionId: string) {
   const agent = get().sessions[sessionId]?.snapshot.agentSessionId;
   const entry = sessionContinuation(get().sessions[sessionId], get().continuations);
-  if (!agent || !entry?.pendingBrief) return;
-  const { pendingBrief: _sent, ...history } = entry;
-  const continuations = { ...get().continuations, [agent]: history };
-  set({ continuations });
-  continuationWrites = continuationWrites.catch(() => undefined).then(() => api.prefSet(CONTINUATIONS_KEY, get().continuations)).catch(() => undefined);
+  if (!agent || !entry?.briefPending) return;
+  const { briefPending: _sent, ...history } = entry;
+  void saveContinuation(get, set, agent, history);
+  void api.prefSet(pendingBriefKey(agent), null).catch(() => undefined);
 }
 
 export function sessionTitle(session: LiveSession, records?: SessionRecord[]): string {
@@ -1062,7 +1135,6 @@ async function attachLive(get: Get, set: Set, handle: SessionHandle, workspaceId
     usage: existing?.usage ?? EMPTY_SESSION_USAGE,
       lastEventAt: existing?.lastEventAt ?? null,
 };
-  const restoredBrief = sessionContinuation(live, get().continuations)?.pendingBrief;
   const sameAttachment = existing?.workspaceId === workspaceId && existing.snapshot.provider === snapshot.provider
     && existing.snapshot.agentSessionId === snapshot.agentSessionId
     && (existing.snapshot.accountId ?? "default") === (snapshot.accountId ?? "default");
@@ -1071,9 +1143,12 @@ async function attachLive(get: Get, set: Set, handle: SessionHandle, workspaceId
   set({
     sessions: { ...get().sessions, [id]: live },
     sessionOrder: [...get().sessionOrder.filter((s) => s !== id), id],
-    sideBrief: restoredBrief || previousBrief ? { ...otherBriefs, [id]: (restoredBrief ?? previousBrief)! } : otherBriefs,
+    sideBrief: previousBrief ? { ...otherBriefs, [id]: previousBrief } : otherBriefs,
     ...(focus ? { view: { kind: "session", sessionId: id } as View, sessionTab: "transcript" as SessionTab } : {}),
   });
+  // A continuation prepared before a restart still owes its first message
+  // the brief.
+  void restorePendingBrief(get, set, id);
   // Read any goal this session is driving now rather than when its tab is
   // first opened: a run has to continue whether or not anyone is looking.
   void get().loadOdyssey(id);
@@ -1167,6 +1242,7 @@ async function attachLive(get: Get, set: Set, handle: SessionHandle, workspaceId
 export function switchesSession(session: { snapshot: Parameters<typeof isLocalChat>[0] & { leadsTeam?: boolean }; localSetup?: LocalSessionSetup } | undefined, pending: PendingProvider, team?: Combo): boolean {
   const snapshot = session?.snapshot;
   if (!snapshot || pending.provider !== snapshot.provider) return true;
+  if (pending.provider === "gemini") return snapshot.leadsTeam === false && (team?.workers.length ?? 0) > 0;
   if (pending.provider !== "local" || !pending.model) return false;
   const harness = localAgentHarness(pending.model);
   if (harness && !isLocalChat(snapshot)) {
@@ -1251,7 +1327,6 @@ export const useStore = create<State>((set, get) => ({
   navHistory: [{ view: { kind: "welcome" }, tab: null }],
   navIndex: 0,
   odysseyFocus: null,
-  if (pending.provider === "gemini") return snapshot.leadsTeam === false && (team?.workers.length ?? 0) > 0;
   changesFocus: null,
   transcriptFocus: null,
   transcriptSearchOpen: false,
@@ -2675,17 +2750,32 @@ export const useStore = create<State>((set, get) => ({
     if (!session) return;
     set({ error: null });
     try {
-      const { archive } = await saveContinuity(get, session);
-      const chunks: string[] = [];
-      let offset = 0;
-      for (;;) {
-        const page = await api.continuityRead(session.handle, archive.id, offset, 24000);
-        chunks.push(page.text);
-        if (page.nextOffset === null) break;
-        if (page.nextOffset <= offset) throw new Error("The continuity reader returned a non-advancing page.");
-        offset = page.nextOffset;
+      // This session's own conversation, as it stands: an export saves no
+      // archive. In front of it, oldest first, the conversations it was
+      // handed, read back from their archives one link at a time.
+      const { markdown } = await continuityDocument(get, session);
+      const earlier: string[] = [];
+      let next = sessionContinuation(session, get().continuations)?.archive?.id ?? null;
+      while (next && earlier.length < 32) {
+        const id: string = next;
+        const pages: string[] = [];
+        next = null;
+        try {
+          for (let offset = 0; ;) {
+            const page = await api.continuityRead(session.handle, id, offset, 24000);
+            pages.push(page.text);
+            next = page.archive.parent ?? null;
+            if (page.nextOffset === null) break;
+            if (page.nextOffset <= offset) throw new Error("The continuity reader returned a non-advancing page.");
+            offset = page.nextOffset;
+          }
+        } catch {
+          // An archive that is gone, or was changed, ends the line there.
+          break;
+        }
+        earlier.unshift(pages.join(""));
       }
-      await api.saveTextFile(`continuity-${archive.id}.md`, chunks.join(""));
+      await api.saveTextFile(`continuity-${session.handle.id.slice(0, 12)}.md`, [...earlier, markdown].join("\n\n---\n\n"));
     } catch (error) {
       set({ error: asError(error) });
       throw error;
@@ -2765,6 +2855,7 @@ export const useStore = create<State>((set, get) => ({
         ...(launch?.reasoningEffort ? { reasoningEffort: launch.reasoningEffort } : {}),
         ...(launch?.resources ? { resources: launch.resources } : {}),
         ...(launch?.combo ? { combo: launch.combo } : {}),
+        ...(launch?.accountId ? { accountId: launch.accountId } : {}),
       });
       // Keep the preparation view visible through snapshot, subscription and
       // history loading. A half-attached session otherwise looks like a blank chat.
@@ -2820,6 +2911,19 @@ export const useStore = create<State>((set, get) => ({
   async saveTeam(sessionId, combo) {
     const session = get().sessions[sessionId];
     if (!session) return;
+    // A Gemini session opened without a team has no team tools and cannot be
+    // given them while it runs. The team is kept for it here, and with
+    // helpers to lead the next message continues in a new Gemini session
+    // that leads them, as a change of provider would.
+    if (session.snapshot.provider === "gemini" && session.snapshot.leadsTeam === false) {
+      set({ teams: { ...get().teams, [sessionId]: combo } });
+      const options = asConfigOptions(session.projection.configOptions ?? session.snapshot.configOptions);
+      const chosen = (value: unknown) => (typeof value === "string" && value !== "default" ? value : undefined);
+      const model = chosen(options.find((option) => option.configId === "model")?.currentValue);
+      const effort = chosen(options.find((option) => isEffortOption(option.configId))?.currentValue);
+      get().setPendingProvider(sessionId, get().pendingProvider[sessionId] ?? { provider: "gemini", ...(model ? { model } : {}), ...(effort ? { effort } : {}) });
+      return;
+    }
     try {
       const saved = await api.delegationComboSet(session.handle, combo);
       set({ teams: { ...get().teams, [sessionId]: saved } });
@@ -2855,7 +2959,6 @@ export const useStore = create<State>((set, get) => ({
       set({ providerModels: { ...get().providerModels, [provider]: models } });
       return models;
     } catch {
-        ...(launch?.accountId ? { accountId: launch.accountId } : {}),
       return [];
     }
   },
@@ -2921,19 +3024,6 @@ export const useStore = create<State>((set, get) => ({
 
   async cancelJob(sessionId, jobId) {
     const session = get().sessions[sessionId];
-    // A Gemini session opened without a team has no team tools and cannot be
-    // given them while it runs. The team is kept for it here, and with
-    // helpers to lead the next message continues in a new Gemini session
-    // that leads them, as a change of provider would.
-    if (session.snapshot.provider === "gemini" && session.snapshot.leadsTeam === false) {
-      set({ teams: { ...get().teams, [sessionId]: combo } });
-      const options = asConfigOptions(session.projection.configOptions ?? session.snapshot.configOptions);
-      const chosen = (value: unknown) => (typeof value === "string" && value !== "default" ? value : undefined);
-      const model = chosen(options.find((option) => option.configId === "model")?.currentValue);
-      const effort = chosen(options.find((option) => isEffortOption(option.configId))?.currentValue);
-      get().setPendingProvider(sessionId, get().pendingProvider[sessionId] ?? { provider: "gemini", ...(model ? { model } : {}), ...(effort ? { effort } : {}) });
-      return;
-    }
     if (!session) return;
     try {
       get().noteJob(await api.delegationJobCancel(session.handle, jobId));
@@ -3058,7 +3148,8 @@ export const useStore = create<State>((set, get) => ({
     try {
       const session = idleHandoffSource(get, sessionId);
       await validateLeaderSource(get, session);
-      const { brief, archive, sequence } = await leaderBrief(get, session);
+      const context = await handoffContext(get, session);
+      const sequence = context.sequence;
       await validateLeaderSource(get, session, sequence);
       const team = preset?.combo ?? get().teams[sessionId];
       const opened = await api.sessionOpen({
@@ -3074,13 +3165,11 @@ export const useStore = create<State>((set, get) => ({
       target = opened.handle;
       await attachLive(get, set, target, session.workspaceId, false, opened.localSetup);
       await validateLeaderSource(get, session, sequence);
-      if (archive) {
-        requireContinuityReader(get().sessions[target.id]!.snapshot);
-        await api.continuityAttach(session.handle, target, archive.id);
-      }
+      const { brief, archive } = await bindArchive(session, get().sessions[target.id], context);
       const agent = get().sessions[target.id]?.snapshot.agentSessionId;
       if (agent && session.snapshot.agentSessionId) {
-        await saveContinuation(get, set, agent, { fromAgentSessionId: session.snapshot.agentSessionId, fromProvider: session.snapshot.provider, target: continuationTarget(get().sessions[target.id]!), pendingBrief: brief, ...(archive ? { archive } : {}) });
+        await keepPendingBrief(agent, brief);
+        await saveContinuation(get, set, agent, { fromAgentSessionId: session.snapshot.agentSessionId, fromProvider: session.snapshot.provider, target: continuationTarget(get().sessions[target.id]!), briefPending: true, ...(archive ? { archive } : {}) });
       }
       await validateLeaderSource(get, session, sequence);
       const key = target.id;
@@ -3161,14 +3250,13 @@ export const useStore = create<State>((set, get) => ({
       checkSource();
       const destination = get().sessions[opened.id];
       if (!destination?.snapshot.agentSessionId || destination.snapshot.accountId !== account.id) refuse(t("The source session changed while the continuation was opening. Try again."));
-      const { brief, archive, sequence } = await leaderBrief(get, current, 24_000);
+      const context = await handoffContext(get, current, 24_000);
+      const sequence = context.sequence;
       checkSource();
-      if (archive) {
-        requireContinuityReader(destination.snapshot);
-        await api.continuityAttach(source.handle, opened, archive.id);
-      }
-      const continuation: Continuation = { fromAgentSessionId: sourceAgent!, fromProvider: snapshot.provider, target: continuationTarget(destination), pendingBrief: brief, ...(archive ? { archive } : {}) };
+      const { brief, archive } = await bindArchive(source, destination, context);
+      const continuation: Continuation = { fromAgentSessionId: sourceAgent!, fromProvider: snapshot.provider, target: continuationTarget(destination), briefPending: true, ...(archive ? { archive } : {}) };
       const destinationAgent = destination.snapshot.agentSessionId;
+      await keepPendingBrief(destinationAgent, brief);
       await saveContinuation(get, set, destinationAgent, continuation);
       // Copy the latest composer state, including edits made during startup.
       checkSource();
@@ -3302,12 +3390,9 @@ export const useStore = create<State>((set, get) => ({
     try {
       const stored = await api.prefGet<Record<string, Continuation>>(CONTINUATIONS_KEY);
       if (stored && typeof stored === "object") {
-        const sideBrief = { ...get().sideBrief };
-        for (const [key, session] of Object.entries(get().sessions)) {
-          const brief = sessionContinuation(session, stored)?.pendingBrief;
-          if (typeof brief === "string") sideBrief[key] = brief;
-        }
-        set({ continuations: stored, sideBrief });
+        set({ continuations: stored });
+        // Sessions attached before the records arrived get their waiting brief now.
+        for (const key of Object.keys(get().sessions)) void restorePendingBrief(get, set, key);
       }
     } catch {
       // None yet.
@@ -3342,7 +3427,7 @@ export const useStore = create<State>((set, get) => ({
     set({ busy: fresh ? t("Starting with {provider}", { provider }) : t("Continuing with {provider}", { provider }), error: null });
     try {
       await validateLeaderSource(get, session);
-      const context = fresh ? undefined : await leaderBrief(get, session);
+      const context = fresh ? undefined : await handoffContext(get, session);
       await validateLeaderSource(get, session, context?.sequence);
       const opened = await api.sessionOpen({
         workspaceId: session.workspaceId,
@@ -3360,18 +3445,15 @@ export const useStore = create<State>((set, get) => ({
       const live = get().sessions[key];
       const agentSessionId = live?.snapshot.agentSessionId ?? opened.snapshot.agentSessionId ?? null;
       await validateLeaderSource(get, session, context?.sequence);
-      if (context?.archive) {
-        requireContinuityReader(live?.snapshot ?? opened.snapshot);
-        await api.continuityAttach(session.handle, opened.handle, context.archive.id);
-      }
+      const bound = context ? await bindArchive(session, live, context) : undefined;
       await validateLeaderSource(get, session, context?.sequence);
       if (!fresh && agentSessionId && fromAgentSessionId) {
-        await saveContinuation(get, set, agentSessionId, { fromAgentSessionId, fromProvider: from, target: continuationTarget(live!), ...(context?.archive ? { archive: context.archive } : {}) });
+        await saveContinuation(get, set, agentSessionId, { fromAgentSessionId, fromProvider: from, target: continuationTarget(live!), ...(bound?.archive ? { archive: bound.archive } : {}) });
       }
       await validateLeaderSource(get, session, context?.sequence);
       // The brief rides in front of the person's message; the transcript
       // shows only the message (see withoutHandoff).
-      const prompt = context ? `${context.brief}${HANDOFF_SPLIT}${draft}` : draft;
+      const prompt = bound ? `${bound.brief}${HANDOFF_SPLIT}${draft}` : draft;
       submitStarted = true;
       const response = await api.sessionSubmit(opened.handle, crypto.randomUUID(), prompt, attachments.map((a) => a.id), mentions);
       if (response.outcome.outcome !== "accepted") {

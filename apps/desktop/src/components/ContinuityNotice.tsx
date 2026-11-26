@@ -1,4 +1,4 @@
-﻿import { useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { t } from "../i18n";
 import { IS_REMOTE } from "../remote/mode";
 import { sessionContinuation, useStore } from "../store";
@@ -20,8 +20,9 @@ export function ContinuityNotice({ sessionId }: { sessionId: string }) {
   return (
     <section aria-label={t("Continuity archive")} className="banner">
       <strong>{t("Private continuity archive available")}</strong>
-      <p className="small">{t("The new leader can read available visible history in pages. Hidden reasoning, binary files and unsent drafts are excluded.")}</p>
-      <details><summary>{t("Archive location")}</summary><span className="small mono">{archive.path}</span></details>
+      <p className="small">{t("The new leader can consult the earlier visible conversation a page at a time. Hidden reasoning, binary files and unsent drafts are not in it.")}</p>
+      {/* A path on the computer, and the export, mean nothing on a phone. */}
+      {!IS_REMOTE && <details><summary>{t("Archive location")}</summary><span className="small mono">{archive.path}</span></details>}
       {!IS_REMOTE && <button className="button button-small" disabled={busy} onClick={() => void save()} type="button">{busy ? t("Exporting…") : t("Export continuity…")}</button>}
     </section>
   );

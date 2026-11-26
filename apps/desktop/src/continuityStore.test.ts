@@ -66,23 +66,28 @@ describe("leader continuity integration", () => {
     expect(useStore.getState().continuations["agent-next"]?.archive).toEqual(archive);
   });
 
-  it("keeps the original conversation and draft when archive creation fails", async () => {
-    vi.mocked(api.continuitySave).mockRejectedValueOnce(new Error("Disk full"));
+  it("carries the excerpt alone when the archive cannot be made, as when it is over the size limit", async () => {
+    vi.mocked(api.continuitySave).mockRejectedValueOnce({ code: "LIMIT_EXCEEDED", message: "continuity archive exceeds 16 MiB", retry: "never" });
     await useStore.getState().continueOnProvider("source");
-    expect(api.sessionOpen).not.toHaveBeenCalled();
-    expect(api.sessionSubmit).not.toHaveBeenCalled();
-    expect(useStore.getState().drafts.source).toBe("NEW_UNSENT_REQUEST");
-    expect(useStore.getState().sessions.source).toBeTruthy();
+    expect(api.sessionOpen).toHaveBeenCalledTimes(1);
+    expect(api.continuityAttach).not.toHaveBeenCalled();
+    const prompt = vi.mocked(api.sessionSubmit).mock.calls[0]![2];
+    expect(prompt).toContain("Remember the original requirements");
+    expect(prompt).toContain("NEW_UNSENT_REQUEST");
+    expect(prompt).not.toContain("read_continuity");
+    expect(useStore.getState().error).toBeNull();
+    expect(useStore.getState().continuations["agent-next"]).toMatchObject({ fromAgentSessionId: "agent-source" });
+    expect(useStore.getState().continuations["agent-next"]?.archive).toBeUndefined();
   });
 
-  it("discards only the unused target when attaching fails", async () => {
+  it("carries the excerpt alone when the archive cannot be bound to the new session", async () => {
     vi.mocked(api.continuityAttach).mockRejectedValueOnce(new Error("Cannot bind"));
     await useStore.getState().continueOnProvider("source");
-    expect(api.sessionStop).toHaveBeenCalledExactlyOnceWith(targetHandle);
-    expect(api.sessionSubmit).not.toHaveBeenCalled();
-    expect(useStore.getState().sessions.source).toBeTruthy();
-    expect(useStore.getState().sessions.next).toBeUndefined();
-    expect(useStore.getState().drafts.source).toBe("NEW_UNSENT_REQUEST");
+    expect(api.sessionSubmit).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(api.sessionSubmit).mock.calls[0]![2]).not.toContain("read_continuity");
+    expect(useStore.getState().sessions.next).toBeTruthy();
+    expect(useStore.getState().continuations["agent-next"]?.archive).toBeUndefined();
+    expect(useStore.getState().error).toBeNull();
   });
 
   it("preserves both sessions after an ambiguous submit error", async () => {
@@ -114,18 +119,24 @@ describe("leader continuity integration", () => {
     expect(vi.mocked(api.sessionSubmit).mock.calls[0]![2]).not.toContain("read_continuity");
   });
 
-  it("does not pretend a local chat can read an archive", async () => {
+  // A local chat has no tools; a Gemini session opened without a team has no team tools.
+  it.each([
+    ["a local chat", { provider: "local", capabilities: { agentName: "thingmaker-local-chat" } }],
+    ["a session without the team tools", { provider: "gemini", leadsTeam: false }],
+  ])("gives %s the excerpt, which is all it can read, and still changes leader", async (_name, shape) => {
     vi.mocked(api.sessionOpen).mockImplementationOnce(async (request) => {
       const response = opened(request);
-      destination.provider = "local";
-      destination.capabilities = { agentName: "thingmaker-local-chat" } as never;
+      Object.assign(destination, shape);
       return response;
     });
     await useStore.getState().continueOnProvider("source");
-    expect(api.sessionSubmit).not.toHaveBeenCalled();
     expect(api.continuityAttach).not.toHaveBeenCalled();
-    expect(useStore.getState().error?.code).toBe("UNSUPPORTED");
-    expect(useStore.getState().sessions.source).toBeTruthy();
+    const prompt = vi.mocked(api.sessionSubmit).mock.calls[0]![2];
+    expect(prompt).toContain("Remember the original requirements");
+    expect(prompt).not.toContain("read_continuity");
+    expect(useStore.getState().error).toBeNull();
+    expect(useStore.getState().sessions.next).toBeTruthy();
+    expect(useStore.getState().continuations["agent-next"]?.archive).toBeUndefined();
   });
 
   it("prepares explicit handoff with a persistent hidden brief, without submitting it", async () => {
@@ -133,12 +144,39 @@ describe("leader continuity integration", () => {
     expect(api.sessionSubmit).not.toHaveBeenCalled();
     expect(api.continuityAttach).toHaveBeenCalled();
     expect(useStore.getState().drafts.next).not.toContain("read_continuity");
-    expect(useStore.getState().sideBrief.next).toContain(archive.id);
+    const brief = useStore.getState().sideBrief.next!;
+    expect(brief).toContain(archive.id);
+    // The brief has a preference of its own. The map of continuations, which
+    // holds every one ever made, says only that a brief is waiting.
+    expect(api.prefSet).toHaveBeenCalledWith("continuation_brief:agent-next", brief);
     const saved = useStore.getState().continuations;
-    vi.spyOn(api, "prefGet").mockResolvedValueOnce(saved);
+    expect(saved["agent-next"]).toMatchObject({ briefPending: true, archive });
+    const written = vi.mocked(api.prefSet).mock.calls.filter(([key]) => key === "session_continuations").at(-1)![1];
+    expect(JSON.stringify(written)).not.toContain("Remember the original requirements");
+    expect(JSON.stringify(written).length).toBeLessThan(1000);
+    vi.spyOn(api, "prefGet").mockImplementation((async (key: string) => (key === "session_continuations" ? saved : key === "continuation_brief:agent-next" ? brief : null)) as never);
     useStore.setState({ continuations: {}, sideBrief: {} });
     await useStore.getState().loadContinuations();
-    expect(useStore.getState().sideBrief.next).toContain(archive.id);
+    await vi.waitFor(() => expect(useStore.getState().sideBrief.next).toBe(brief));
+  });
+
+  it("changes leader even when the record of it cannot be written", async () => {
+    vi.mocked(api.prefSet).mockRejectedValue({ code: "LIMIT_EXCEEDED", message: "preference exceeds 256 KiB", retry: "never" });
+    await useStore.getState().continueOnProvider("source");
+    expect(api.sessionSubmit).toHaveBeenCalledTimes(1);
+    expect(useStore.getState().error).toBeNull();
+    expect(useStore.getState().sessions.next).toBeTruthy();
+    expect(useStore.getState().continuations["agent-next"]).toMatchObject({ fromAgentSessionId: "agent-source", archive });
+  });
+
+  it("keeps only the newest continuations, so their record stays inside one preference", async () => {
+    const old = Object.fromEntries(Array.from({ length: 300 }, (_, index) => [`agent-old-${index}`, { fromAgentSessionId: `from-${index}`, fromProvider: "claude" as const }]));
+    useStore.setState({ continuations: old });
+    await useStore.getState().continueOnProvider("source");
+    const kept = Object.keys(useStore.getState().continuations);
+    expect(kept).toHaveLength(300);
+    expect(kept[0]).toBe("agent-old-1");
+    expect(kept.at(-1)).toBe("agent-next");
   });
 
   it("preserves inherited context when switching an empty prepared continuation again", async () => {
@@ -150,15 +188,33 @@ describe("leader continuity integration", () => {
     expect(vi.mocked(api.sessionSubmit).mock.calls[0]![2]).toContain("previous leader's pending briefing");
   });
 
-  it("exports the entire inherited document using the reader's Unicode offsets", async () => {
+  it("exports what the session was handed, link by link, then its own conversation, saving no archive", async () => {
+    const parent = { ...archive, id: "00000000-0000-4000-8000-000000000000" };
+    useStore.setState({ continuations: { "agent-source": { fromAgentSessionId: "old", fromProvider: "claude", archive, target: { workspaceId: "workspace", provider: "codex", accountId: "default" } } } });
     vi.spyOn(api, "continuityRead")
-      .mockResolvedValueOnce({ archive, text: "first😀", nextOffset: 6, totalChars: 10 })
-      .mockResolvedValueOnce({ archive, text: "last", nextOffset: null, totalChars: 10 });
+      .mockResolvedValueOnce({ archive: { ...archive, parent: parent.id }, text: "first😀", nextOffset: 6, totalChars: 10 })
+      .mockResolvedValueOnce({ archive: { ...archive, parent: parent.id }, text: "last", nextOffset: null, totalChars: 10 })
+      .mockResolvedValueOnce({ archive: parent, text: "OLDEST", nextOffset: null, totalChars: 6 });
     vi.spyOn(api, "saveTextFile").mockResolvedValueOnce("C:/chosen/continuity.md");
     await useStore.getState().exportContinuity("source");
     expect(api.continuityRead).toHaveBeenNthCalledWith(2, sourceHandle, archive.id, 6, 24000);
-    expect(api.saveTextFile).toHaveBeenCalledWith(`continuity-${archive.id}.md`, "first😀last");
+    expect(api.continuityRead).toHaveBeenNthCalledWith(3, sourceHandle, parent.id, 0, 24000);
+    const [name, text] = vi.mocked(api.saveTextFile).mock.calls[0]!;
+    expect(name).toBe("continuity-source.md");
+    expect(text.startsWith("OLDEST\n\n---\n\nfirst😀last\n\n---\n\n")).toBe(true);
+    expect(text).toContain("Remember the original requirements");
+    expect(api.continuitySave).not.toHaveBeenCalled();
     expect(api.sessionSubmit).not.toHaveBeenCalled();
+  });
+
+  it("exports a session's own conversation when an archive it was handed is gone", async () => {
+    useStore.setState({ continuations: { "agent-source": { fromAgentSessionId: "old", fromProvider: "claude", archive, target: { workspaceId: "workspace", provider: "codex", accountId: "default" } } } });
+    vi.spyOn(api, "continuityRead").mockRejectedValue({ code: "NOT_READY", message: "continuity archive not found", retry: "never" });
+    vi.spyOn(api, "saveTextFile").mockResolvedValueOnce("C:/chosen/continuity.md");
+    await useStore.getState().exportContinuity("source");
+    const text = vi.mocked(api.saveTextFile).mock.calls[0]![1];
+    expect(text.startsWith("# Continuity archive")).toBe(true);
+    expect(useStore.getState().error).toBeNull();
   });
 
   it("marks native history loss while retaining available cached early messages", async () => {
@@ -184,11 +240,22 @@ describe("leader continuity integration", () => {
   it("does not restore legacy private briefs or another account's scoped continuation", async () => {
     const source = useStore.getState().sessions.source!;
     const legacy = { fromAgentSessionId: "old", fromProvider: "claude" as const, pendingBrief: "PRIVATE_LEGACY_TEXT" };
-    vi.spyOn(api, "prefGet").mockResolvedValueOnce({ "agent-source": legacy });
+    vi.spyOn(api, "prefGet").mockImplementation((async (key: string) => (key === "session_continuations" ? { "agent-source": legacy } : "ANOTHER_ACCOUNTS_BRIEF")) as never);
     await useStore.getState().loadContinuations();
+    await Promise.resolve();
     expect(useStore.getState().sideBrief.source).toBeUndefined();
     expect(sessionContinuation(source, { "agent-source": legacy })).toBeUndefined();
-    expect(sessionContinuation(source, { "agent-source": { ...legacy, archive, target: { workspaceId: "workspace", provider: "codex", accountId: "another-account" } } })).toBeUndefined();
+    // The same conversation moved to another account keeps the link back to
+    // the earlier one, and nothing that was prepared for the first account.
+    const scoped = { fromAgentSessionId: "old", fromProvider: "claude" as const, archive, briefPending: true };
+    expect(sessionContinuation(source, { "agent-source": { ...scoped, target: { workspaceId: "workspace", provider: "codex", accountId: "another-account" } } })).toEqual({ fromAgentSessionId: "old", fromProvider: "claude" });
+    useStore.setState({ continuations: { "agent-source": { ...scoped, target: { workspaceId: "workspace", provider: "codex", accountId: "another-account" } } } });
+    await useStore.getState().loadContinuations();
+    await Promise.resolve();
+    expect(useStore.getState().sideBrief.source).toBeUndefined();
+    // An id that happens to match in another workspace or provider is not this conversation at all.
+    expect(sessionContinuation(source, { "agent-source": { ...scoped, target: { workspaceId: "elsewhere", provider: "codex", accountId: "default" } } })).toBeUndefined();
+    expect(sessionContinuation(source, { "agent-source": { ...scoped, target: { workspaceId: "workspace", provider: "claude", accountId: "default" } } })).toBeUndefined();
   });
 
   it("serializes durable metadata writes for independent simultaneous handoffs", async () => {
@@ -211,10 +278,10 @@ describe("leader continuity integration", () => {
     vi.mocked(api.prefSet).mockImplementationOnce(() => new Promise<void>((resolve) => { release = resolve; }));
     const first = useStore.getState().handOff("source", "gemini");
     const other = useStore.getState().handOff("source2", "claude");
-    await vi.waitFor(() => expect(api.prefSet).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(api.prefSet).toHaveBeenCalled());
     release();
     await Promise.all([first, other]);
-    const saved = vi.mocked(api.prefSet).mock.calls.at(-1)![1] as Record<string, unknown>;
+    const saved = vi.mocked(api.prefSet).mock.calls.filter(([key]) => key === "session_continuations").at(-1)![1] as Record<string, unknown>;
     expect(saved).toHaveProperty("agent-next1");
     expect(saved).toHaveProperty("agent-next2");
     expect(useStore.getState().continuations).toHaveProperty("agent-next1");

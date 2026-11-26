@@ -58,7 +58,10 @@ describe("preparing a continuation after quota exhaustion", () => {
     expect(state.mentions.next).toEqual(state.mentions.source);
     expect(state.teams.next).toEqual(team);
     expect(state.sideBrief.next).toContain("Finish the pending feature");
-    expect(state.continuations["agent-next"]?.pendingBrief).toBe(state.sideBrief.next);
+    // The brief waits in a preference of its own; the record only says one is waiting.
+    expect(state.continuations["agent-next"]).toMatchObject({ briefPending: true });
+    expect(state.continuations["agent-next"]?.pendingBrief).toBeUndefined();
+    expect(api.prefSet).toHaveBeenCalledWith("continuation_brief:agent-next", state.sideBrief.next);
     expect(api.sessionSubmit).not.toHaveBeenCalled();
     expect(api.accountSetActive).not.toHaveBeenCalled();
     expect(api.sessionStop).not.toHaveBeenCalled();
@@ -133,17 +136,18 @@ describe("preparing a continuation after quota exhaustion", () => {
   it("restores a pending brief after reload and consumes it only after an accepted send", async () => {
     await useStore.getState().prepareQuotaContinuation("source", { provider: "gemini" });
     const saved = useStore.getState().continuations;
-    vi.spyOn(api, "prefGet").mockResolvedValueOnce(saved);
+    const brief = useStore.getState().sideBrief.next!;
+    vi.spyOn(api, "prefGet").mockImplementation((async (key: string) => (key === "session_continuations" ? saved : key === "continuation_brief:agent-next" ? brief : null)) as never);
     useStore.setState({ sideBrief: {}, continuations: {} });
     await useStore.getState().loadContinuations();
-    expect(useStore.getState().sideBrief.next).toContain("Finish the pending feature");
+    await vi.waitFor(() => expect(useStore.getState().sideBrief.next).toContain("Finish the pending feature"));
     await useStore.getState().send("next");
     expect(api.sessionSubmit).toHaveBeenCalledWith(targetHandle, expect.any(String), expect.stringContaining("Finish the pending feature"), ["image-id"], expect.any(Array));
-    expect(useStore.getState().continuations["agent-next"]?.pendingBrief).toBeUndefined();
+    expect(useStore.getState().continuations["agent-next"]?.briefPending).toBeUndefined();
     expect(useStore.getState().sideBrief.next).toBeUndefined();
+    await vi.waitFor(() => expect(api.prefSet).toHaveBeenCalledWith("continuation_brief:agent-next", null));
     expect(useStore.getState().drafts.source).toBe("Do not send this draft yet");
   });
-});
 
   it("prepares the continuation even when no preference can be written", async () => {
     vi.mocked(api.prefSet).mockRejectedValue({ code: "LIMIT_EXCEEDED", message: "preference exceeds 256 KiB", retry: "never" });
@@ -176,3 +180,4 @@ describe("moving a session to another account", () => {
     await useStore.getState().openSession("workspace", { mode: "resume", session_id: "agent-elsewhere" }, "codex", { accountId: "work" });
     expect(api.sessionOpen).toHaveBeenCalledWith(expect.objectContaining({ mode: { mode: "resume", session_id: "agent-elsewhere" }, accountId: "work" }));
   });
+});

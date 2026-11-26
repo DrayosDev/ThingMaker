@@ -24,11 +24,11 @@ export function ContinuitySettings() {
   };
   return (
     <>
-      <SettingGroup note={t("Private Markdown files stay in ThingMaker app data. Export lets you choose where to save a copy.")}>
-        <SettingRow name={t("Automatic continuity")} hint={t("Save private Markdown before changing leader or provider, including quota continuation. Automatic continuity needs an agent with tools; turn it off to continue in Local Chat with a limited excerpt.")}>
+      <SettingGroup note={t("Private Markdown files stay in ThingMaker app data: the newest 200, each deleted with the session it belongs to. Export lets you choose where to save a copy.")}>
+        <SettingRow name={t("Automatic continuity")} hint={t("Save the conversation as private Markdown when its leader or provider changes, including after a usage limit, for the next leader to consult. A session without tools, such as Local Chat, gets the recent excerpt alone, and so does a change made from the phone.")}>
           <Switch checked={uiPrefs.autoContinuity !== false} label={t("Automatic continuity")} onChange={(on) => void setUiPrefs({ autoContinuity: on })} />
         </SettingRow>
-        <SettingRow name={t("What carries over")} hint={t("The next leader can consult the full available history in chunks. Hidden reasoning is not restored; binary image and audio contents and unsent drafts are excluded. Truncated or unavailable provider content is marked.")} />
+        <SettingRow name={t("What carries over")} hint={t("The next leader gets a recent excerpt and can consult the rest of the visible conversation a page at a time. Hidden reasoning is not restored; binary image and audio contents and unsent drafts are excluded. Truncated or unavailable provider content is marked.")} />
       </SettingGroup>
       <SettingGroup title={t("Export continuity")}>
         <SettingRow name={t("Conversation")} hint={ids.length ? undefined : t("No open conversations")}>
