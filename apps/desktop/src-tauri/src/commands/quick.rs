@@ -200,6 +200,10 @@ pub(crate) async fn delete(state: &AppState, workspace_id: &str) -> CommandResul
         if !report.problems.is_empty() {
             tracing::warn!(workspace = %workspace_id, problems = ?report.problems, "quick chat deleted with problems");
         }
+        // Every continuity archive of the chat, whichever provider it was on.
+        if let Err(error) = super::continuity::forget_workspace(state, &root) {
+            tracing::warn!(error = %error.message, "a deleted quick chat's continuity archives were not removed");
+        }
         // The folder first: if it can't go, the chat stays listed and the
         // next start tries again.
         if let Err(error) = std::fs::remove_dir_all(&root)
