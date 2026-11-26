@@ -188,11 +188,22 @@ pub(super) fn hold(root: &Path) {
     if let Ok(file) = File::open(root.join(IN_USE_LOCK)) && file.lock_shared().is_ok() { held.insert(root.to_path_buf(), file); }
 }
 
+/// Takes the whole lock on `file` if nothing holds it. A lock just let go can
+/// stay held for an instant by a child process that was being started at that
+/// moment, until it becomes its own program; a holder that is still there
+/// after a fifth of a second is a real one.
+fn lock_if_free(file: &File) -> bool {
+    (0..10).any(|attempt| {
+        if attempt > 0 { std::thread::sleep(std::time::Duration::from_millis(20)); }
+        file.try_lock().is_ok()
+    })
+}
+
 /// The lock `hold` shares, taken whole: granted only while no running
 /// ThingMaker has started a session with imported skills, and none can start
 /// one with them until it is dropped.
 fn unused(root: &Path) -> Option<File> {
-    File::open(root.join(IN_USE_LOCK)).ok().filter(|file| file.try_lock().is_ok())
+    File::open(root.join(IN_USE_LOCK)).ok().filter(lock_if_free)
 }
 
 /// Copies `provider`'s skills, as `entries` lists them before any import is
@@ -204,7 +215,7 @@ pub(super) fn sync(root: &Path, provider: &str, entries: &[ResourceEntry]) -> Re
     std::fs::create_dir_all(&directory).map_err(failed)?;
     if !root.join(IN_USE_LOCK).exists() { File::create(root.join(IN_USE_LOCK)).map_err(failed)?; }
     let lock = File::options().create(true).truncate(false).write(true).open(directory.join(SYNC_LOCK)).map_err(failed)?;
-    if lock.try_lock().is_err() { return Err(DesktopError::conflict("These skills are already being imported. Try again when that import ends.")) }
+    if !lock_if_free(&lock) { return Err(DesktopError::conflict("These skills are already being imported. Try again when that import ends.")) }
     // Nothing else writes here while the lock is held: a temporary folder or
     // file found now was left by an import that did not end.
     for entry in std::fs::read_dir(&directory).map_err(failed)?.flatten() {
