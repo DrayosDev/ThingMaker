@@ -241,7 +241,7 @@ type State = {
   odysseyPlanChanges: Record<string, PlanChangeRecord[]>;
   /** Decisions the agent handed to the user, newest first. */
   odysseyQuestions: Record<string, QuestionRecord[]>;
-  showHidden: boolean;
+  expandedArchives: Record<string, boolean>;
   view: View;
   sessions: Record<string, LiveSession>;
   sessionOrder: string[];
@@ -537,7 +537,7 @@ type State = {
   noteClaudeLimit: (message: string | null | undefined) => boolean;
   /** Asks the Claude account whether it has room, without spending a turn. */
   refreshClaudeUsage: () => Promise<UsageSnapshot | null>;
-  setShowHidden: (show: boolean) => void;
+  toggleArchiveList: (workspaceId: string) => void;
   /** Opens or resumes a session. A resume runs on the provider that wrote it; a new one on `provider`, else the last one used. */
   openSession: (workspaceId: string, mode: OpenMode, provider?: Provider, launch?: NewSessionLaunch) => Promise<void>;
   /** Opens a fresh session on a named agent and returns how to address it. */
@@ -1032,7 +1032,7 @@ export const useStore = create<State>((set, get) => ({
   odysseyMovedAway: {},
   odysseyPlanChanges: {},
   odysseyQuestions: {},
-  showHidden: false,
+  expandedArchives: {},
   view: { kind: "welcome" },
   sessions: {},
   sessionOrder: [],
@@ -2008,8 +2008,10 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
-  setShowHidden(show) {
-    set({ showHidden: show });
+  toggleArchiveList(workspaceId) {
+    set((state) => ({
+      expandedArchives: { ...state.expandedArchives, [workspaceId]: !state.expandedArchives[workspaceId] },
+    }));
   },
 
   /**

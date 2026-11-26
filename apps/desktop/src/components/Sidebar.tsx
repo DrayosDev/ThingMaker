@@ -545,8 +545,8 @@ export function Sidebar() {
   const loadRecords = useStore((s) => s.loadRecords);
   const addWorkspaceByPicker = useStore((s) => s.addWorkspaceByPicker);
   const records = useStore((s) => s.records);
-  const showHidden = useStore((s) => s.showHidden);
-  const setShowHidden = useStore((s) => s.setShowHidden);
+  const expandedArchives = useStore((s) => s.expandedArchives);
+  const toggleArchiveList = useStore((s) => s.toggleArchiveList);
   const toggleSidebar = useStore((s) => s.toggleSidebar);
   const setView = useStore((s) => s.setView);
   const loadProviders = useStore((s) => s.loadProviders);
@@ -797,6 +797,7 @@ export function Sidebar() {
 
         {projectGroups.map(({ workspace, inspection, trusted, project, liveCount, unpinned, pinnedRows, archivedRows }) => {
           const selected = view.kind === "workspace" && view.workspaceId === workspace.id;
+          const archiveExpanded = expandedArchives[workspace.id] ?? false;
           const isCollapsed = collapsed[workspace.id] ?? false;
           return (
             <section className="ws-group" key={workspace.id}>
@@ -930,12 +931,12 @@ export function Sidebar() {
                   )}
                   {archivedRows.length > 0 && (
                     <li>
-                      <button className="disclosure" onClick={() => setShowHidden(!showHidden)} type="button">
-                        <IconChevron open={showHidden} size={12} /> {t("Archived ({count})", { count: archivedRows.length })}
+                      <button className="disclosure" aria-expanded={archiveExpanded} onClick={() => toggleArchiveList(workspace.id)} type="button">
+                        <IconChevron open={archiveExpanded} size={12} /> {t("Archived ({count})", { count: archivedRows.length })}
                       </button>
                     </li>
                   )}
-                  {showHidden &&
+                  {archiveExpanded &&
                     archivedRows.map((row) => (
                       <SessionRow
                         key={`archived-${row.id}`}

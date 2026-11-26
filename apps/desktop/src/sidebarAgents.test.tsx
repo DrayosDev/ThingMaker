@@ -58,7 +58,7 @@ function seed(records: SessionRecord[]) {
     sessions: {},
     sessionOrder: [],
     records: { w1: records },
-    showHidden: false,
+    expandedArchives: {},
   });
 }
 
@@ -101,6 +101,27 @@ describe("the session list comes from the desktop's own records", () => {
     render(<Sidebar />);
     expect(screen.getByText("Season 2 planning")).toBeTruthy();
     expect(screen.queryByText(/Session b220f825/)).toBeNull();
+  });
+
+  it("toggles archived sessions independently for each project", () => {
+    const first = record({ agentSessionId: "first", autoTitle: "First archive", archiveState: "archived" });
+    const second = record({ agentSessionId: "second", workspaceId: "w2", autoTitle: "Second archive", archiveState: "archived" });
+    seed([first]);
+    useStore.setState({
+      workspaces: [workspace, { ...workspace, id: "w2", displayPath: "/Users/p/P4", canonicalRoot: "/Users/p/P4" }],
+      records: { w1: [first], w2: [second] },
+    });
+    render(<Sidebar />);
+    const [a, b] = screen.getAllByRole("button", { name: "Archived (1)" });
+    fireEvent.click(a!);
+    expect(screen.getByText("First archive")).toBeTruthy();
+    expect(screen.queryByText("Second archive")).toBeNull();
+    fireEvent.click(b!);
+    expect(screen.getByText("First archive")).toBeTruthy();
+    expect(screen.getByText("Second archive")).toBeTruthy();
+    fireEvent.click(a!);
+    expect(screen.queryByText("First archive")).toBeNull();
+    expect(screen.getByText("Second archive")).toBeTruthy();
   });
 
   it("leaves a tombstoned row out", () => {
