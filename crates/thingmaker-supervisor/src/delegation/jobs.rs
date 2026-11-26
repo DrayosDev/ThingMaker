@@ -388,6 +388,8 @@ struct Inner {
     local_gate: Arc<tokio::sync::Semaphore>,
     /// Who hears what happens in the sessions' chats.
     chat_listener: std::sync::RwLock<Option<Arc<dyn Fn(chat::ChatEvent) + Send + Sync>>>,
+    /// How long a chat message waits for its recipient.
+    chat_expiry: Mutex<Duration>,
 }
 
 /// What a local job waiting its turn says.
@@ -432,6 +434,7 @@ impl Delegation {
                 idle: Mutex::new(WORKER_IDLE),
                 local_gate: Arc::new(tokio::sync::Semaphore::new(1)),
                 chat_listener: std::sync::RwLock::new(None),
+                chat_expiry: Mutex::new(chat::DELIVERY_EXPIRY),
             }),
         }
     }
@@ -771,6 +774,11 @@ impl Delegation {
         if slot.provider == Provider::Gemini && self.chat_open_to(&caller) {
             let members = serde_json::Value::Array(self.chat_members(&caller));
             prompt.push_str(&format!("\nTeam chat addresses: {members}. To send or reply, finish with a line TEAM_CHAT followed by a JSON object with string fields to and text, and optional numeric reply_to."));
+            // It has no tool call to hear this through.
+            let undelivered = self.chat_undelivered(&caller);
+            if !undelivered.is_empty() {
+                prompt.push_str(&format!("\nTeam chat messages of yours that were not delivered: {}.", serde_json::Value::Array(undelivered)));
+            }
         }
         self.ensure_reaper();
         let service = self.clone();

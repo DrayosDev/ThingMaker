@@ -783,3 +783,38 @@ async fn a_sessions_chat_holds_only_so_many_messages() {
     assert_eq!(service.jobs("lead").len(), 1);
     service.release("lead").await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_message_its_recipient_cannot_take_is_given_up_and_the_sender_is_told() {
+    use thingmaker_supervisor::delegation::mcp;
+    // A worker busy for three seconds that cannot be steered.
+    let Some((service, _, _)) = service_with_flags(&[], &["--slow=3", "--no-steer"]) else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let token = service.register("lead", Provider::Claude, dir.path().into(), team());
+    let lead = service.caller_for_token(&token).unwrap();
+    let worker = service.delegate("lead", DelegateArgs { task: "Read the brief".into(), worker: Some("sonnet".into()), ..Default::default() }).unwrap();
+    until(|| service.job("lead", &worker.id).unwrap().status == JobStatus::Running).await;
+
+    service.set_chat_expiry(Duration::from_millis(400));
+    service.send_chat(&lead, &worker.id, "Which file?", None).unwrap();
+    let given_up = settled(&service, "lead").await;
+    assert!(!given_up.delivered);
+    assert!(given_up.error.as_deref().unwrap().contains("sonnet did not take the message within a second"), "{:?}", given_up.error);
+    assert_eq!(service.job("lead", &worker.id).unwrap().status, JobStatus::Running, "the worker was still busy");
+
+    // It does not hold the next one, which waits for the worker and goes in.
+    service.set_chat_expiry(Duration::from_secs(60));
+    let sent = mcp::handle(&service, &lead, &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "chat_send", "arguments": {"to": worker.id, "text": "Which file, when you are free?"}}})).await.unwrap();
+    let result = &sent["result"]["structuredContent"];
+    assert_eq!(result["id"], 2, "{sent}");
+    // The sender hears of the first with this call, and only once.
+    assert_eq!(result["undelivered"][0]["id"], 1, "{sent}");
+    assert!(result["undelivered"][0]["error"].as_str().unwrap().contains("did not take the message"));
+    let members = mcp::handle(&service, &lead, &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "chat_members", "arguments": {}}})).await.unwrap();
+    assert!(members["result"]["structuredContent"].get("undelivered").is_none(), "{members}");
+    let delivered = settled(&service, "lead").await;
+    assert_eq!(delivered.id, 2);
+    assert!(delivered.delivered, "{:?}", delivered.error);
+    assert!(service.chat_undelivered(&lead).is_empty());
+    service.release("lead").await;
+}

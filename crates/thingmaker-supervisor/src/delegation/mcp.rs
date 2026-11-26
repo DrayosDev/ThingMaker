@@ -234,6 +234,17 @@ async fn call_tool(delegation: &Delegation, session: &str, name: &str, arguments
     }
 }
 
+/// A chat tool's result, with the caller's messages that were given up since
+/// it last called one: `chat_send` answers before delivery, so this is where
+/// the sender hears that a message never arrived.
+fn with_undelivered(delegation: &Delegation, caller: &Caller, mut result: Value) -> Value {
+    let undelivered = delegation.chat_undelivered(caller);
+    if !undelivered.is_empty() {
+        result["undelivered"] = Value::Array(undelivered);
+    }
+    result
+}
+
 /// Every tool this caller may use: the team's own (orchestrators only), then
 /// the extension's.
 fn tools_for(delegation: &Delegation, caller: &Caller) -> Value {
@@ -246,7 +257,7 @@ fn tools_for(delegation: &Delegation, caller: &Caller) -> Value {
     if delegation.chat_open_to(caller) {
         list.extend([
             json!({"name":"chat_members","description":"List addresses of actual participants in this session, including closed workers you can wake.","annotations":{"readOnlyHint":true,"openWorldHint":false},"inputSchema":{"type":"object","properties":{},"additionalProperties":false}}),
-            json!({"name":"chat_send","description":"Message one participant in this session. Returns immediately. Reply with reply_to and the sender address. Send only when you have information or a question; acknowledgements are unnecessary.","annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":false},"inputSchema":{"type":"object","properties":{"to":{"type":"string"},"text":{"type":"string"},"reply_to":{"type":"integer","minimum":1}},"required":["to","text"],"additionalProperties":false}})
+            json!({"name":"chat_send","description":"Message one participant in this session. Returns immediately, before delivery: a message its recipient could not take is listed under `undelivered` in the result of your next chat call. Reply with reply_to and the sender address. Send only when you have information or a question; acknowledgements are unnecessary.","annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":false},"inputSchema":{"type":"object","properties":{"to":{"type":"string"},"text":{"type":"string"},"reply_to":{"type":"integer","minimum":1}},"required":["to","text"],"additionalProperties":false}})
         ]);
     }
     for extension in delegation.extensions() {
@@ -290,7 +301,7 @@ pub async fn handle(delegation: &Delegation, caller: &Caller, message: &Value) -
             let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
             if name == "chat_members" {
                 if delegation.chat_open_to(caller) {
-                    text_result(&json!({"members":delegation.chat_members(caller)}), false)
+                    text_result(&with_undelivered(delegation, caller, json!({"members":delegation.chat_members(caller)})), false)
                 } else {
                     error_result("Agent chat is off for this member of the team.")
                 }
@@ -298,7 +309,7 @@ pub async fn handle(delegation: &Delegation, caller: &Caller, message: &Value) -
                 let reply = arguments.get("reply_to").map(|v| v.as_u64().and_then(|id| usize::try_from(id).ok()).ok_or("Invalid reply_to."));
                 let result = reply.transpose().map_err(str::to_owned).and_then(|reply| delegation.send_chat(caller, arguments["to"].as_str().unwrap_or(""), arguments["text"].as_str().unwrap_or(""), reply));
                 match result {
-                    Ok(message) => text_result(&json!({"id":message.id,"to":message.to}),false),
+                    Ok(message) => text_result(&with_undelivered(delegation, caller, json!({"id":message.id,"to":message.to})), false),
                     Err(error) => error_result(&error),
                 }
             } else {

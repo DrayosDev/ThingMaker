@@ -6,6 +6,11 @@
 //! writing anything ([`MAX_UNPROMPTED_STARTS`]), and by how many messages it
 //! may hold in all ([`MAX_SESSION_MESSAGES`]). A sender past either is told
 //! so, and the session's view says it for the person.
+//!
+//! A recipient's messages are delivered one at a time, in order. One it
+//! cannot take — it is busy and cannot be steered, or waiting out a limit —
+//! is given up after [`DELIVERY_EXPIRY`] rather than holding the rest, and
+//! its sender hears of it with the next chat tool it calls.
 use super::*;
 use crate::supervisor::SteerOutcome;
 use serde_json::{Value, json};
@@ -25,6 +30,9 @@ pub const MAX_UNPROMPTED_STARTS: usize = 6;
 /// Messages the agents of one session may exchange in all.
 pub const MAX_SESSION_MESSAGES: usize = 60;
 
+/// How long a message waits for its recipient before it is given up.
+pub const DELIVERY_EXPIRY: Duration = Duration::from_secs(15 * 60);
+
 /// Workers answering a chat message at once. These jobs are apart from the
 /// orchestrator's own ([`MAX_RUNNING_JOBS`]): a busy chat must not leave it
 /// unable to delegate.
@@ -38,6 +46,9 @@ pub(super) struct Room {
     pub(super) closing: HashSet<String>,
     /// Deliveries that started a turn or a job since the person last wrote.
     unprompted: usize,
+    /// Sends that were refused outright, by sender, for a sender that has
+    /// no tool result to read the refusal in.
+    refusals: HashMap<String, Vec<Value>>,
 }
 
 impl Room {
@@ -108,6 +119,9 @@ pub struct Message {
     pub sent_at: u64,
     pub delivered: bool,
     pub error: Option<String>,
+    /// The sender has been told it was given up.
+    #[serde(skip)]
+    reported: bool,
 }
 
 impl Delegation {
@@ -169,6 +183,34 @@ impl Delegation {
             }
         };
         self.chat_event(ChatEvent::Changed { session });
+    }
+
+    /// How long a message waits for its recipient (tests shorten it).
+    pub fn set_chat_expiry(&self, expiry: Duration) {
+        *self.inner.chat_expiry.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = expiry;
+    }
+
+    /// The caller's own messages that were given up since it last asked, and
+    /// why. Each is told once: with the result of its next chat tool.
+    pub fn chat_undelivered(&self, caller: &Caller) -> Vec<Value> {
+        let session = caller.orchestrator();
+        let mut state = self.state();
+        let address = match caller {
+            Caller::Orchestrator { .. } => LEAD.to_string(),
+            Caller::Worker { job_id, .. } => match state.jobs.get(job_id).filter(|job| job.view.orchestrator == session) {
+                Some(job) => job.address.clone(),
+                None => return Vec::new(),
+            },
+        };
+        let Some(team) = state.orchestrators.get_mut(session) else { return Vec::new() };
+        let mut undelivered = team.chat.refusals.remove(&address).unwrap_or_default();
+        for message in team.chat.messages.iter_mut().filter(|message| message.from == address && !message.reported) {
+            if let Some(error) = &message.error {
+                message.reported = true;
+                undelivered.push(json!({"id": message.id, "to": message.to, "error": error}));
+            }
+        }
+        undelivered
     }
 
     /// Counts a delivery that is about to start a turn or a job, and refuses
@@ -275,6 +317,7 @@ impl Delegation {
                 sent_at: now_unix_ms(),
                 delivered: false,
                 error: None,
+                reported: false,
             };
             room.messages.push(message.clone());
             (message, room.draining.insert(to), team.token.clone())
@@ -334,8 +377,15 @@ impl Delegation {
             "ThingMaker team chat #{} from {} ({}). To reply, use chat_send with to={} and reply_to={}.\n\n{}",
             message.id, message.from_name, message.from, message.from, message.id, message.text
         );
+        let expiry = *self.inner.chat_expiry.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let deadline = message.sent_at.saturating_add(expiry.as_millis() as u64);
         let mut changed = self.inner.changed.subscribe();
         loop {
+            // Its recipient was out of reach the whole time: given up, so
+            // the messages behind it get their turn.
+            if now_unix_ms() >= deadline {
+                return Err(expired(message, expiry));
+            }
             let (actor, job) = {
                 let state = self.state();
                 let team = state
@@ -419,7 +469,17 @@ impl Delegation {
                 };
                 match self.delegate_inner(session, args, Some(message.id)) {
                     Ok(next) => {
-                        let taken = self.await_chat_job(session, message, generation, &next.id, &mut changed).await;
+                        let taken = self.await_chat_job(session, message, generation, &next.id, deadline, &mut changed).await;
+                        // The job it started was still waiting (for the local
+                        // model, or a limit to lift): it is withdrawn too.
+                        let taken = match taken {
+                            Ok(true) => Ok(()),
+                            Ok(false) => {
+                                let _ = self.cancel(session, &next.id).await;
+                                Err(expired(message, expiry))
+                            }
+                            Err(error) => Err(error),
+                        };
                         if taken.is_err() {
                             self.release_start(session);
                         }
@@ -447,21 +507,28 @@ impl Delegation {
     }
 
     /// Waits for the job a message started to take it: delivered once the
-    /// worker has the prompt, failed if the job ends first.
-    async fn await_chat_job(&self, session: &str, message: &Message, generation: &str, job_id: &str, changed: &mut watch::Receiver<u64>) -> Result<(), String> {
+    /// worker has the prompt, failed if the job ends first. `false` when the
+    /// message's time ran out with the job still not at it.
+    async fn await_chat_job(&self, session: &str, message: &Message, generation: &str, job_id: &str, deadline: u64, changed: &mut watch::Receiver<u64>) -> Result<bool, String> {
         loop {
             {
                 let state = self.state();
                 let team = state.orchestrators.get(session).filter(|team| team.token == generation).ok_or("Session ended.")?;
                 if team.chat.messages[message.id - 1].delivered {
-                    return Ok(());
+                    return Ok(true);
                 }
                 let record = state.jobs.get(job_id).ok_or("Job ended.")?;
                 if record.view.status.is_finished() {
                     return Err(record.view.error.clone().unwrap_or_else(|| "Message was not accepted.".into()));
                 }
             }
-            changed.changed().await.map_err(|_| "Session ended.")?;
+            let left = deadline.saturating_sub(now_unix_ms());
+            if left == 0 {
+                return Ok(false);
+            }
+            if let Ok(Err(_)) = tokio::time::timeout(Duration::from_millis(left), changed.changed()).await {
+                return Err("Session ended.".into());
+            }
         }
     }
 
@@ -488,9 +555,25 @@ impl Delegation {
         for line in text.lines().filter_map(|line| line.strip_prefix("TEAM_CHAT ")).take(16) {
             if let Ok(value) = serde_json::from_str::<Value>(line)
                 && let (Some(to), Some(body)) = (value["to"].as_str(), value["text"].as_str())
+                && let Err(error) = self.send_chat(&caller, to, body, value["reply_to"].as_u64().and_then(|n| n.try_into().ok()))
             {
-                let _ = self.send_chat(&caller, to, body, value["reply_to"].as_u64().and_then(|n| n.try_into().ok()));
+                // Kept for its next prompt: this sender has no tool result.
+                let mut state = self.state();
+                let from = state.jobs.get(&spec.job_id).map(|job| job.address.clone());
+                if let (Some(from), Some(team)) = (from, state.orchestrators.get_mut(&spec.orchestrator)) {
+                    team.chat.refusals.entry(from).or_default().push(json!({"to": to, "error": error}));
+                }
             }
         }
     }
+}
+
+/// What a message given up for want of its recipient says.
+fn expired(message: &Message, expiry: Duration) -> String {
+    let waited = match expiry.as_secs() {
+        seconds if seconds >= 120 => format!("{} minutes", seconds / 60),
+        seconds if seconds > 1 => format!("{seconds} seconds"),
+        _ => "a second".to_string(),
+    };
+    format!("{} did not take the message within {waited}: it was busy and could not be interrupted, or was waiting out a limit. It was not delivered.", message.to_name)
 }
