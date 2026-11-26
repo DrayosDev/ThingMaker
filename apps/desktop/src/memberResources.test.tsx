@@ -1,10 +1,10 @@
 import { useState } from "react";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import type { MemberResourceCatalog, WorkerSlot } from "@thingmaker/contracts";
+import type { MemberResourceCatalog, MemberResourceEntry, WorkerSlot } from "@thingmaker/contracts";
 
 vi.mock("./ipc", () => ({ api: { memberResources: vi.fn(), importedSkillsSetup: vi.fn() } }));
-import { api, type CatalogEntry } from "./ipc";
+import { api } from "./ipc";
 import { MemberResources } from "./components/MemberResources";
 import { useStore } from "./store";
 
@@ -167,7 +167,7 @@ it("points a missing connection to Settings › Integrations", async () => {
   expect(useStore.getState().view).toEqual({ kind: "settings", tab: "integrations" });
 });
 
-const skill = (name: string, skillDependencies: string[] = [], available = true): CatalogEntry =>
+const skill = (name: string, skillDependencies: string[] = [], available = true): MemberResourceEntry =>
   ({ id: `skill:user:${name}`, name, kind: "skill", description: name, group: "user", available, problem: null, skillDependencies });
 const box = (name: string) => screen.getByRole("checkbox", { name }) as HTMLInputElement;
 

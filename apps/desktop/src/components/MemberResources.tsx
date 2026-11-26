@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { PROVIDER_LABELS, localAgentHarness, localModelId, parseLocalModel } from "@thingmaker/contracts";
-import type { MemberResourceSelection, WorkerSlot } from "@thingmaker/contracts";
-import { api, type ImportedSkillsProvider, type ImportedSkillsStatus, type ResourceCatalog } from "../ipc";
+import type { ImportedSkillsProvider, ImportedSkillsStatus, MemberResourceCatalog, MemberResourceSelection, WorkerSlot } from "@thingmaker/contracts";
+import { api } from "../ipc";
 import { referencedSkills, resourceGroupLabel, storedSelection } from "../memberResourceDependencies";
 import { useStore } from "../store";
 import { t } from "../i18n";
@@ -50,7 +50,7 @@ export function MemberResources({ worker, onChange, initialWorkspace = "" }: { i
   const account = useStore((s) => `${s.accounts.claude?.find((entry) => entry.active)?.id ?? ""}:${s.accounts.codex?.find((entry) => entry.active)?.id ?? ""}`);
   const [workspaceId, setWorkspaceId] = useState(initialWorkspace);
   const [refresh, setRefresh] = useState(0);
-  const [catalog, setCatalog] = useState<ResourceCatalog | null>(null);
+  const [catalog, setCatalog] = useState<MemberResourceCatalog | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [tab, setTab] = useState<"skills" | "mcps">("skills");

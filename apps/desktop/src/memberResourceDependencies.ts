@@ -1,5 +1,4 @@
 import type { MemberMcpDependency, MemberResourceCatalog, MemberResourceEntry, MemberResourceSelection } from "@thingmaker/contracts";
-import type { CatalogEntry } from "./ipc";
 import { t } from "./i18n";
 
 export type SkillConnection = MemberMcpDependency & { skills: string[]; candidates: MemberResourceEntry[] };
@@ -53,7 +52,7 @@ export function resourceGroupLabel(group: string): string {
  * mapping, and nothing is reached through it. Ticked skills are in neither:
  * the stored selection holds what the person ticked, and these are derived
  * again on every change. A selection that does not ask adds nothing. */
-export function referencedSkills(entries: CatalogEntry[], selection: MemberResourceSelection): { included: Map<string, string[]>; removed: Map<string, string[]> } {
+export function referencedSkills(entries: MemberResourceEntry[], selection: MemberResourceSelection): { included: Map<string, string[]>; removed: Map<string, string[]> } {
   const included = new Map<string, string[]>();
   const removed = new Map<string, string[]>();
   if (!selection.referencedSkills) return { included, removed };

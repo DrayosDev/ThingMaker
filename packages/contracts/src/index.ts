@@ -560,8 +560,18 @@ export type WorkerSlot = {
  *  stored, compared and launched exactly as it was. */
 export type MemberResourceSelection = { skills: string[]; mcps: string[]; referencedSkills?: boolean; excludedSkills?: string[] };
 export type MemberMcpDependency = { name: string; evidence: "declared" | "reference"; required: boolean; mcpIds: string[] };
-export type MemberResourceEntry = { id: string; kind: "skill" | "mcp"; name: string; description: string; group: string; source?: string; target?: string; available: boolean; problem: string | null; mcpDependencies?: MemberMcpDependency[]; dependencyNotes?: string[] };
-export type MemberResourceCatalog = { entries: MemberResourceEntry[]; notes: string[]; problem: string | null };
+/** A provider whose skills can be copied into `~/.thingmaker/imported-skills/<provider>`. */
+export type ImportedSkillsProvider = "claude" | "codex" | "gemini";
+/** One provider's import. Once `imported`, the catalog lists the copies in
+ *  place of the provider's own skills, as the last import left them: `outdated`
+ *  of them have a source that changed since. Only `importedSkillsSetup` copies;
+ *  listing the catalog never does. `syncedAt` is unix ms. */
+export type ImportedSkillsStatus = { provider: ImportedSkillsProvider; imported: boolean; skills: number; outdated: number; syncedAt: number | null; problem: string | null };
+/** `skillDependencies` holds the ids of the skills this one refers to (direct
+ *  only). `provider` is whose skill or server it is. `duplicateOf` is the
+ *  ThingMaker skill this one is a word-for-word copy of; both stay selectable. */
+export type MemberResourceEntry = { id: string; kind: "skill" | "mcp"; name: string; description: string; group: string; source?: string; target?: string; available: boolean; problem: string | null; mcpDependencies?: MemberMcpDependency[]; dependencyNotes?: string[]; skillDependencies?: string[]; provider?: ImportedSkillsProvider | "thingmaker" | null; duplicateOf?: string };
+export type MemberResourceCatalog = { entries: MemberResourceEntry[]; notes: string[]; problem: string | null; imports?: ImportedSkillsStatus[] };
 
 /**
  * Who on a team may message the others directly: nobody, its members on
@@ -1414,7 +1424,9 @@ export type OutboxEntry = { record: OutboxRecord; agentSessionId: string | null;
 // Context sources and integration configuration (CTX-01, CFG-04..11)
 // ---------------------------------------------------------------------------
 
-export type SkillScope = "project" | "user";
+/** `thingmaker` is `~/.thingmaker/skills`: no agent reads it natively, the
+ *  member selector offers its skills to every agent, and it has no workspace. */
+export type SkillScope = "project" | "user" | "thingmaker";
 export type SkillEntry = {
   directoryName: string;
   scope: SkillScope;
@@ -1874,6 +1886,7 @@ export const COMMANDS = {
   sessionSetReporting: "session_set_reporting",
   mcpOverview: "mcp_overview",
   memberResources: "member_resources_catalog",
+  importedSkillsSetup: "imported_skills_setup",
   mcpCatalog: "mcp_catalog",
   mcpParse: "mcp_parse",
   mcpInstall: "mcp_install",

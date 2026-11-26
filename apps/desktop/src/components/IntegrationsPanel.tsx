@@ -10,9 +10,9 @@
  * to an agent or spends tokens.
  */
 import { Suspense, lazy, useCallback, useEffect, useState } from "react";
-import type { ConfigFile, InstructionFileName } from "@thingmaker/contracts";
+import type { ConfigFile, ConfigTarget, ContextSources, InstructionFileName, SkillEntry, SkillScope } from "@thingmaker/contracts";
 import { PROVIDER_LABELS } from "@thingmaker/contracts";
-import { api, type AnySkillScope, type SkillSource, type SkillSources, type SkillTarget } from "../ipc";
+import { api } from "../ipc";
 import { basenameOf, projectTeamPreset, useStore } from "../store";
 import { t } from "../i18n";
 
@@ -24,14 +24,14 @@ import { Fold, FoldItem, Select, SettingGroup, SettingRow } from "./settings/con
 const CodeEditor = lazy(() => import("./MonacoEditor"));
 
 /** A skill scope as the person reads it. */
-const scopeLabel = (scope: AnySkillScope) => (scope === "project" ? t("project") : scope === "thingmaker" ? "ThingMaker" : t("user"));
+const scopeLabel = (scope: SkillScope) => (scope === "project" ? t("project") : scope === "thingmaker" ? "ThingMaker" : t("user"));
 
 /** Where a skill lives as the person reads it, on a chip or in the scope choice. */
-const scopeChip = (scope: AnySkillScope) => (scope === "project" ? t("This project") : scope === "thingmaker" ? "ThingMaker" : t("Every project"));
+const scopeChip = (scope: SkillScope) => (scope === "project" ? t("This project") : scope === "thingmaker" ? "ThingMaker" : t("Every project"));
 
 /** The file a skill's editor opens; only project skills belong to a workspace. */
-const skillTarget = (scope: AnySkillScope, workspaceId: string | null, directoryName: string): SkillTarget =>
-  scope === "thingmaker" ? { kind: "skill", scope, workspaceId: null, directoryName } : { kind: "skill", scope, workspaceId: scope === "project" ? workspaceId : null, directoryName };
+const skillTarget = (scope: SkillScope, workspaceId: string | null, directoryName: string): ConfigTarget =>
+  ({ kind: "skill", scope, workspaceId: scope === "project" ? workspaceId : null, directoryName });
 
 /** Which provider reads which instruction file, and why both exist. */
 const INSTRUCTION_FILES: { file: InstructionFileName; readBy: string }[] = [
@@ -39,7 +39,7 @@ const INSTRUCTION_FILES: { file: InstructionFileName; readBy: string }[] = [
   { file: "CLAUDE.md", readBy: PROVIDER_LABELS.claude },
 ];
 
-function FileEditor({ target, title, onSaved }: { target: SkillTarget; title: string; onSaved: () => void }) {
+function FileEditor({ target, title, onSaved }: { target: ConfigTarget; title: string; onSaved: () => void }) {
   const setError = useStore((s) => s.setError);
   const [file, setFile] = useState<ConfigFile | null>(null);
   const [draft, setDraft] = useState("");
@@ -127,10 +127,10 @@ export function IntegrationsSettings() {
   const projectPresetId = useStore((s) => workspaceId ? projectTeamPreset(s, workspaceId)?.id : undefined);
   const projectSelected = useStore((s) => s.workspaces.some((workspace) => workspace.id === workspaceId) && !s.quickChats.some((chat) => chat.workspaceId === workspaceId));
   const setProjectTeamPreset = useStore((s) => s.setProjectTeamPreset);
-  const [sources, setSources] = useState<SkillSources | null>(null);
-  const [editor, setEditor] = useState<{ target: SkillTarget; title: string } | null>(null);
-  const [newSkill, setNewSkill] = useState<{ scope: AnySkillScope; name: string } | null>(null);
-  const [removing, setRemoving] = useState<SkillSource | null>(null);
+  const [sources, setSources] = useState<ContextSources | null>(null);
+  const [editor, setEditor] = useState<{ target: ConfigTarget; title: string } | null>(null);
+  const [newSkill, setNewSkill] = useState<{ scope: SkillScope; name: string } | null>(null);
+  const [removing, setRemoving] = useState<SkillEntry | null>(null);
   const [keepBackup, setKeepBackup] = useState(true);
   const [removalNote, setRemovalNote] = useState<string | null>(null);
 
@@ -298,7 +298,7 @@ export function IntegrationsSettings() {
               <Select
                 choices={(["project", "user", "thingmaker"] as const).map((scope) => ({ value: scope, label: scopeChip(scope) }))}
                 label={t("Where the skill lives")}
-                onChange={(scope) => setNewSkill({ ...newSkill, scope: scope as AnySkillScope })}
+                onChange={(scope) => setNewSkill({ ...newSkill, scope: scope as SkillScope })}
                 value={newSkill.scope}
               />
               {newSkill.scope === "thingmaker" && <span className="set-item-note">{t("Available to every agent through ThingMaker's selector")}</span>}

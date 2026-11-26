@@ -135,3 +135,16 @@ pub fn resolve_for(state: &AppState, root: &Path, provider: Provider, model: Opt
     }
     Ok(Some(resolved))
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn importing_skills_has_one_name_everywhere_and_none_on_the_phone() {
+        let name = "imported_skills_setup";
+        // The renderer calls the name the contracts give it, and the host registers that command.
+        assert!(include_str!("../../../../../packages/contracts/src/index.ts").contains(&format!("importedSkillsSetup: \"{name}\"")));
+        assert!(include_str!("../lib.rs").contains(&format!("commands::member_resources::{name},")));
+        // It copies files into the person's home: a paired phone cannot ask for it.
+        assert!(!crate::remote::dispatch::ALLOWED.contains(&name));
+    }
+}
