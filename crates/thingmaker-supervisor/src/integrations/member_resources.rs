@@ -56,6 +56,10 @@ pub struct ResourceEntry {
     skill_path: Option<PathBuf>,
     #[serde(skip)]
     bridge_skill: bool,
+    /// Listed from a plugin Claude Code did not install itself: it never
+    /// takes a name from a definition listed before it.
+    #[serde(skip)]
+    yields: bool,
     /// The plugin a skill came from, by its short name.
     #[serde(skip)]
     plugin: Option<String>,
@@ -110,6 +114,12 @@ impl ResourceCatalog {
         }
         self
     }
+}
+
+/// One ordinary folder name. Joined to a folder it stays inside it: no
+/// separators, no `..`, and no `C:name`, which Windows reads as another drive.
+fn plain_name(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', ':'])
 }
 
 fn read(path: &Path) -> Result<Value, DesktopError> {
@@ -380,7 +390,7 @@ pub fn catalog_with_homes(home: &Path, config_dir: &Path, codex_home: &Path, roo
             add_plugin(&mut entries, &path, &manifest, id, &format!("plugin:{id}"), name, enabled)?;
         }
     }
-    plugins::add_synced_claude_plugins(&mut entries, &config_dir.join("plugins/synced"));
+    plugins::add_synced_claude_plugins(&mut entries, &config_dir.join("plugins/synced"), &settings["oauthAccount"]);
     plugins::add_codex_plugins(&mut entries, codex_home);
     for entry in &mut entries { entry.provider = provider_of(&entry.source).map(str::to_string); }
     let imports = imported::apply(&mut entries, &imported::root(home));
@@ -395,8 +405,13 @@ pub fn catalog_with_homes(home: &Path, config_dir: &Path, codex_home: &Path, roo
     for (index, entry) in entries.iter().enumerate() {
         if entry.available {
             let key = (entry.kind.clone(), entry.runtime_name.clone(), entry.source.starts_with(".codex/config"));
-            let user_skill_wins = entry.kind == "skill" && winners.get(&key).is_some_and(|previous: &usize| entries[*previous].group == "user");
-            if !user_skill_wins { winners.insert(key, index); }
+            let previous: Option<usize> = winners.get(&key).copied();
+            let user_skill_wins = entry.kind == "skill" && previous.is_some_and(|previous| entries[previous].group == "user");
+            // A plugin synced from claude.ai or installed in Codex is new to
+            // this list: a member that already selected a Claude plugin's
+            // server of the same name keeps the server it selected.
+            let yields = entry.yields && previous.is_some();
+            if !user_skill_wins && !yields { winners.insert(key, index); }
         }
     }
     // ThingMaker's own skills are also installed where agents read them
