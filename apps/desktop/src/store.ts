@@ -1151,9 +1151,11 @@ async function attachLive(get: Get, set: Set, handle: SessionHandle, workspaceId
 /**
  * Whether a pending choice moves the conversation to a new session: another
  * provider, or a local chat becoming a local agent (or back), which run as
- * different programs.
+ * different programs. With `team`, the team the next message is for: a
+ * Gemini session opened without one runs in a mode that cannot take one
+ * while it runs, so helpers to lead move it to a new Gemini session too.
  */
-export function switchesSession(session: { snapshot: Parameters<typeof isLocalChat>[0]; localSetup?: LocalSessionSetup } | undefined, pending: PendingProvider): boolean {
+export function switchesSession(session: { snapshot: Parameters<typeof isLocalChat>[0] & { leadsTeam?: boolean }; localSetup?: LocalSessionSetup } | undefined, pending: PendingProvider, team?: Combo): boolean {
   const snapshot = session?.snapshot;
   if (!snapshot || pending.provider !== snapshot.provider) return true;
   if (pending.provider !== "local" || !pending.model) return false;
@@ -1240,6 +1242,7 @@ export const useStore = create<State>((set, get) => ({
   navHistory: [{ view: { kind: "welcome" }, tab: null }],
   navIndex: 0,
   odysseyFocus: null,
+  if (pending.provider === "gemini") return snapshot.leadsTeam === false && (team?.workers.length ?? 0) > 0;
   changesFocus: null,
   transcriptFocus: null,
   transcriptSearchOpen: false,
@@ -2908,6 +2911,19 @@ export const useStore = create<State>((set, get) => ({
 
   async cancelJob(sessionId, jobId) {
     const session = get().sessions[sessionId];
+    // A Gemini session opened without a team has no team tools and cannot be
+    // given them while it runs. The team is kept for it here, and with
+    // helpers to lead the next message continues in a new Gemini session
+    // that leads them, as a change of provider would.
+    if (session.snapshot.provider === "gemini" && session.snapshot.leadsTeam === false) {
+      set({ teams: { ...get().teams, [sessionId]: combo } });
+      const options = asConfigOptions(session.projection.configOptions ?? session.snapshot.configOptions);
+      const chosen = (value: unknown) => (typeof value === "string" && value !== "default" ? value : undefined);
+      const model = chosen(options.find((option) => option.configId === "model")?.currentValue);
+      const effort = chosen(options.find((option) => isEffortOption(option.configId))?.currentValue);
+      get().setPendingProvider(sessionId, get().pendingProvider[sessionId] ?? { provider: "gemini", ...(model ? { model } : {}), ...(effort ? { effort } : {}) });
+      return;
+    }
     if (!session) return;
     try {
       get().noteJob(await api.delegationJobCancel(session.handle, jobId));
@@ -3269,7 +3285,7 @@ export const useStore = create<State>((set, get) => ({
 
   setPendingProvider(sessionId, pending) {
     const { [sessionId]: _previous, ...rest } = get().pendingProvider;
-    set({ pendingProvider: pending && switchesSession(get().sessions[sessionId], pending) ? { ...rest, [sessionId]: pending } : rest });
+    set({ pendingProvider: pending && switchesSession(get().sessions[sessionId], pending, get().teams[sessionId]) ? { ...rest, [sessionId]: pending } : rest });
   },
 
   async loadContinuations() {
@@ -3534,7 +3550,7 @@ export const useStore = create<State>((set, get) => ({
   async applyPresetToSession(sessionId, preset) {
     const session = get().sessions[sessionId];
     if (!session) return "applied";
-    if (switchesSession(session, preset.orchestrator)) return "needs_handoff";
+    if (switchesSession(session, preset.orchestrator, preset.combo)) return "needs_handoff";
     await get().saveTeam(sessionId, preset.combo);
     const options = asConfigOptions(session.snapshot.configOptions);
     const model = options.find((option) => option.configId === "model");
@@ -3562,7 +3578,7 @@ export const useStore = create<State>((set, get) => ({
   async send(sessionId) {
     if (leaderContinuations.has(sessionId) || quotaContinuationSessions.has(sessionId)) return;
     const pending = get().pendingProvider[sessionId];
-    if (pending && switchesSession(get().sessions[sessionId], pending)) return get().continueOnProvider(sessionId);
+    if (pending && switchesSession(get().sessions[sessionId], pending, get().teams[sessionId])) return get().continueOnProvider(sessionId);
     const session = get().sessions[sessionId];
     const draft = get().drafts[sessionId] ?? "";
     const attachments = get().attachments[sessionId] ?? [];

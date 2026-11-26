@@ -350,6 +350,13 @@ export type Snapshot = {
   provider: Provider;
   /** Account fixed when this attachment opened; independent of the global picker. */
   accountId?: string | null;
+  /**
+   * Whether this attachment has the tools to lead a team. One without them
+   * (a Gemini session opened without a team, a local chat) cannot be given a
+   * team while it runs, and cannot read a continuity archive. Absent on an
+   * older host: assume it has.
+   */
+  leadsTeam?: boolean;
   historyStart: DecimalId;
   historyDropped: number;
   /** The agent's own id for the session, once `session/new` has answered. */
