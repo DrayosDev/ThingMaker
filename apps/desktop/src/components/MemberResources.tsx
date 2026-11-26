@@ -143,6 +143,7 @@ export function MemberResources({ worker, onChange, initialWorkspace = "" }: { i
                 return <label className={`member-resource ${entry.available ? "" : "muted"}`} key={entry.id}>
                   <input type="checkbox" aria-label={entry.name} checked={explicit || includedBy !== undefined} disabled={includedBy !== undefined || (!entry.available && !explicit)} onChange={(event) => patch({ ...selection, [tab]: event.target.checked ? [...selection[tab], entry.id] : selection[tab].filter((id) => id !== entry.id) })} />
                   <span><strong>{entry.name}</strong>{entry.source && <span className="small muted">{entry.source}</span>}{entry.target && <span className="small muted">{entry.target}</span>}<span className="small muted">{entry.problem ?? entry.description}</span>
+                    {entry.duplicateOf && <span className="small muted">{t("Same skill as ThingMaker's own copy")}</span>}
                     {dependencies.length > 0 && <span className="small muted">{t("Uses {skills}", { skills: nameList(dependencies) })}</span>}
                     {includedBy && <span className="small muted">{t("Included by {skills}", { skills: nameList(includedBy) })} <button className="link" type="button" onClick={() => patch({ ...selection, skills: [...selection.skills, entry.id] })}>{t("Keep selected")}</button></span>}
                   </span>

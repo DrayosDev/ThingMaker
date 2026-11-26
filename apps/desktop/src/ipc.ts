@@ -159,7 +159,7 @@ export type ImportedSkillsProvider = "claude" | "codex" | "gemini";
 /** Once `imported`, the catalog lists the copies instead of the provider's own skills. `syncedAt` is unix ms. */
 export type ImportedSkillsStatus = { provider: ImportedSkillsProvider; imported: boolean; skills: number; syncedAt: number | null; problem: string | null };
 /** `skillDependencies` holds the ids of the skills this one references (direct only). */
-export type CatalogEntry = MemberResourceEntry & { skillDependencies?: string[]; provider?: ImportedSkillsProvider | "thingmaker" | null };
+export type CatalogEntry = MemberResourceEntry & { skillDependencies?: string[]; provider?: ImportedSkillsProvider | "thingmaker" | null; duplicateOf?: string };
 export type ResourceCatalog = Omit<MemberResourceCatalog, "entries"> & { entries: CatalogEntry[]; imports?: ImportedSkillsStatus[] };
 /** `thingmaker` is `~/.thingmaker/skills`, offered to every agent through the member selector; it ignores the workspace. */
 export type AnySkillScope = SkillScope | "thingmaker";

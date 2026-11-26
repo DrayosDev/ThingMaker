@@ -45,4 +45,5 @@ export const memberResources: Record<string, string> = {
   "Uses {skills}": "Usa {skills}",
   "Included by {skills}": "Incluida por {skills}",
   "Keep selected": "Mantener seleccionada",
+  "Same skill as ThingMaker's own copy": "La misma skill que la copia propia de ThingMaker",
 };

@@ -46,6 +46,10 @@ pub struct ResourceEntry {
     pub skill_dependencies: Vec<String>,
     /// Whose skill or server this is: claude, codex, gemini or thingmaker.
     pub provider: Option<String>,
+    /// The ThingMaker skill this one is a word-for-word copy of. Both stay
+    /// selectable; a member given both loads it once.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duplicate_of: Option<String>,
     #[serde(skip)]
     runtime_name: String,
     #[serde(skip)]
@@ -54,6 +58,9 @@ pub struct ResourceEntry {
     revision: String,
     #[serde(skip)]
     skill_path: Option<PathBuf>,
+    /// Hash of the SKILL.md this entry was read from.
+    #[serde(skip)]
+    skill_hash: String,
     #[serde(skip)]
     bridge_skill: bool,
     /// Listed from a plugin Claude Code did not install itself: it never
@@ -156,7 +163,7 @@ fn add_skills(out: &mut Vec<ResourceEntry>, directory: &Path, group: &str, prefi
         out.push(ResourceEntry { id: format!("skill:{prefix}:{name}"), kind: "skill".into(), name: runtime_name.clone(),
             description: description(&text, front.description), group: group.into(), available: enabled && !disabled,
             problem: if !enabled { Some("Plugin disabled for this project".into()) } else { disabled.then(|| "Manual-only or forked skill; not supported by the member pilot".into()) }, runtime_name, config: Value::Null,
-            revision: format!("{}:{revision}", file.display()), source: if plugin.is_some() { "plugin".into() } else { ".claude/skills".into() },
+            revision: format!("{}:{revision}", file.display()), skill_hash: revision, source: if plugin.is_some() { "plugin".into() } else { ".claude/skills".into() },
             plugin: plugin.map(str::to_string), unit_root: Some(directory.clone()), skill_path: Some(file), ..Default::default() });
     }
 }
@@ -415,13 +422,12 @@ pub fn catalog_with_homes(home: &Path, config_dir: &Path, codex_home: &Path, roo
         }
     }
     // ThingMaker's own skills are also installed where agents read them
-    // natively (`big-thing` in ~/.agents/skills); list each one once.
-    let own: Vec<Vec<u8>> = entries.iter().filter(|entry| entry.group == "thingmaker").filter_map(|entry| entry.skill_path.as_ref().and_then(|path| std::fs::read(path).ok())).collect();
+    // natively (`big-thing` in ~/.agents/skills). The native copy is marked,
+    // never turned off: a team saved with it keeps starting.
+    let own: BTreeMap<String, String> = entries.iter().filter(|entry| entry.kind == "skill" && entry.group == "thingmaker").map(|entry| (entry.skill_hash.clone(), entry.id.clone())).collect();
     for (index, entry) in entries.iter_mut().enumerate() {
-        if entry.kind == "skill" && entry.group != "thingmaker" && entry.available && entry.skill_path.as_ref().and_then(|path| std::fs::read(path).ok()).is_some_and(|bytes| own.contains(&bytes)) {
-            entry.available = false;
-            entry.problem = Some("Same skill as ThingMaker's own copy".into());
-        } else if entry.kind == "skill" && !entry.group.starts_with("plugin:") && matches!(entry.source.as_str(), ".claude/skills" | "imported-skills/claude")
+        if entry.kind == "skill" && entry.group != "thingmaker" { entry.duplicate_of = own.get(&entry.skill_hash).cloned(); }
+        if entry.kind == "skill" && !entry.group.starts_with("plugin:") && matches!(entry.source.as_str(), ".claude/skills" | "imported-skills/claude")
             && skill_overrides.get(&entry.name).is_some_and(|mode| mode == "off" || mode == "user-invocable-only") {
             entry.available = false;
             entry.problem = Some("Skill disabled for model invocation in Claude settings".into());
@@ -694,6 +700,8 @@ pub fn resolve(catalog: &ResourceCatalog, selection: &ResourceSelection, environ
             let entry = catalog.entries.iter().find(|entry| entry.id == *id && entry.kind == kind && entry.available)
                 .ok_or_else(|| DesktopError::not_ready(format!("Selected resource {id} is missing or disabled. Edit this member's selection.")))?;
             revisions.insert(id, entry.revision.clone());
+            // The same skill twice, once as ThingMaker's own: load ThingMaker's.
+            if kind == "skill" && entry.duplicate_of.as_ref().is_some_and(|own| skill_ids.contains(own)) { continue }
             if kind == "skill" {
                 let path = entry.skill_path.as_ref().and_then(|path| path.canonicalize().ok()).ok_or_else(|| DesktopError::not_ready("Selected skill file is no longer available"))?;
                 // A symlinked installation can expose the same physical skill

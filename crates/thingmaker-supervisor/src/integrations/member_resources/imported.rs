@@ -281,7 +281,7 @@ mod tests {
     }
 
     #[test]
-    fn thingmaker_skills_are_listed_once_for_every_provider() {
+    fn a_native_copy_of_a_thingmaker_skill_stays_selectable() {
         let temp = tempfile::tempdir().unwrap();
         let (home, config, codex) = (temp.path(), temp.path().join(".claude"), temp.path().join(".codex"));
         let text = "---\nname: big-thing\ndescription: Runs\n---\n";
@@ -290,9 +290,23 @@ mod tests {
         let found = catalog_with_homes(home, &config, &codex, None).unwrap();
         let own = found.entries.iter().find(|entry| entry.id == "skill:thingmaker:big-thing").unwrap();
         assert_eq!((own.group.as_str(), own.provider.as_deref(), own.available), ("thingmaker", Some("thingmaker"), true));
+        assert_eq!(own.duplicate_of, None);
+        // A team saved before ThingMaker had its own skills selected the native copy.
         let native = found.entries.iter().find(|entry| entry.id == "skill:agents-user:big-thing").unwrap();
-        assert!(!native.available);
-        assert_eq!(native.problem.as_deref(), Some("Same skill as ThingMaker's own copy"));
+        assert!(native.available && native.problem.is_none());
+        assert_eq!(native.duplicate_of.as_deref(), Some("skill:thingmaker:big-thing"));
+        let saved = ResourceSelection { skills: vec!["skill:agents-user:big-thing".into()], ..Default::default() };
+        let resolved = resolve(&found, &saved, &Default::default()).unwrap();
+        assert!(resolved.skill_sources[0].path.starts_with(home.join(".agents/skills").canonicalize().unwrap()));
+        // Given both, the member loads the skill once.
+        let both = ResourceSelection { skills: vec!["skill:agents-user:big-thing".into(), "skill:thingmaker:big-thing".into()], ..Default::default() };
+        let resolved = resolve(&found, &both, &Default::default()).unwrap();
+        assert_eq!(resolved.skill_sources.len(), 1);
+        assert!(resolved.skill_sources[0].path.starts_with(home.join(".thingmaker/skills").canonicalize().unwrap()));
+        // An edited native copy is a skill of its own.
+        write(&home.join(".agents/skills/big-thing/SKILL.md"), "---\nname: big-thing\ndescription: Mine\n---\n");
+        let found = catalog_with_homes(home, &config, &codex, None).unwrap();
+        assert_eq!(found.entries.iter().find(|entry| entry.id == "skill:agents-user:big-thing").unwrap().duplicate_of, None);
         assert!(super::setup(&super::root(home), "gemini-cli").is_err());
     }
 }
