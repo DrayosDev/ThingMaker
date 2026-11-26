@@ -81,8 +81,21 @@ pub const RETRY_KEY: &str = "delegationRetry";
 /// to outlast `await_jobs`.
 const CLAUDE_MCP_TOOL_TIMEOUT_MS: &str = "1800000";
 
+pub use thingmaker_supervisor::storage::workspaces::GEMINI_NATIVE as GEMINI_NATIVE_KEY;
+
 pub fn session_scope(row_id: &str) -> String {
     format!("session:{row_id}")
+}
+
+/// Whether a Gemini session about to open runs on native `agy acp`, the only
+/// mode that takes the session's own `team` server. A new one does when it
+/// starts with a team to lead; a reopened one does when it began that way.
+/// Every other Gemini session is the plain stream-json session it always was.
+pub fn gemini_native(state: &AppState, resumed_row: Option<&str>, combo: &Combo) -> bool {
+    match resumed_row {
+        Some(row) => state.with_storage(|s| s.setting_get::<bool>(GEMINI_NATIVE_KEY, row)).ok().flatten().unwrap_or(false),
+        None => !combo.workers.is_empty(),
+    }
 }
 
 /// Starts the service and its socket; called once from `setup`.
@@ -142,18 +155,29 @@ pub fn starting_combo(state: &AppState, requested: Option<Combo>, row_id: Option
 
 /// Makes the attachment about to open an orchestrator: registers it, hands
 /// it the ThingMaker MCP server, and tells it about its team. Without the
-/// service (it failed to start) the session opens as a plain one.
-pub fn prepare_orchestrator(state: &AppState, key: &str, root: PathBuf, combo: &Combo, launch: &mut AgentLaunch, config: &mut SessionActorConfig) {
+/// service (it failed to start) the session opens as a plain one. Says
+/// whether the session leads a team.
+///
+/// `gemini_native` is [`gemini_native`]'s answer; other providers ignore it.
+pub fn prepare_orchestrator(state: &AppState, key: &str, root: PathBuf, combo: &Combo, launch: &mut AgentLaunch, config: &mut SessionActorConfig, gemini_native: bool) -> bool {
     // A provider that cannot take the session's own MCP server cannot lead
     // a team: it opens as a plain session.
     if !launch.provider().can_orchestrate() {
-        return;
+        return false;
+    }
+    if let AgentLaunch::Gemini(options) = launch {
+        if !gemini_native {
+            return false;
+        }
+        // The transport is the conversation's, with or without the service.
+        options.native_acp = true;
     }
     let (Some(delegation), Some(socket), Some(program)) = (state.delegation.get(), state.delegation_socket.get(), relay_program()) else {
-        return;
+        return false;
     };
     let token = delegation.register(key, launch.provider(), root, combo.clone());
     config.mcp_servers = vec![server_entry(&program, &[RELAY_ARG.to_string()], socket.path(), &token)];
+    config.leads_team = true;
     let withheld = combo.withholds_native_subagents();
     let guidance = orchestrator_guidance(withheld);
     match launch {
@@ -171,7 +195,6 @@ pub fn prepare_orchestrator(state: &AppState, key: &str, root: PathBuf, combo: &
             options.developer_instructions = Some(guidance);
         }
         AgentLaunch::Gemini(options) => {
-            options.native_acp = true;
             // Native ACP's system-prompt extension has no established payload
             // contract here. Use an ordinary prompt block instead of guessing.
             // Do not claim native subagent tools have been disabled.
@@ -182,6 +205,7 @@ pub fn prepare_orchestrator(state: &AppState, key: &str, root: PathBuf, combo: &
             options.initial_prompt_prefix = Some(prompt);
         }
     }
+    true
 }
 
 /// After the orchestrator is open: its quota reports feed the router.

@@ -488,7 +488,11 @@ pub async fn session_open(request: OpenRequest, state: State<'_, AppState>) -> C
     // A fork starts with its main session's team: it has the same tools.
     let row_before = recorded.as_ref().map(|row| row.id.as_str());
     let combo = super::delegation::starting_combo(&state, request.combo.clone(), row_before);
-    super::delegation::prepare_orchestrator(&state, session_id.as_str(), PathBuf::from(&record.canonical_root), &combo, &mut launch, &mut config);
+    // A Gemini conversation keeps the transport it began on: only one that
+    // started with a team to lead runs on native `agy acp`.
+    let resumed_row = row_before.filter(|_| matches!(request.mode, OpenRequestMode::Resume { .. }));
+    let gemini_native = provider == Provider::Gemini && super::delegation::gemini_native(&state, resumed_row, &combo);
+    super::delegation::prepare_orchestrator(&state, session_id.as_str(), PathBuf::from(&record.canonical_root), &combo, &mut launch, &mut config, gemini_native);
     if let Some(resources) = resolved {
         config.builtin_web = resources.builtin_web;
         match thingmaker_supervisor::integrations::member_resources::apply_to_launch(resources, &mut launch) {
@@ -579,6 +583,9 @@ pub async fn session_open(request: OpenRequest, state: State<'_, AppState>) -> C
                     };
                     let session = storage_handle.with_storage(|s| s.session_by_agent_id(&workspace_id, &agent_session_id)).ok().flatten();
                     let result = storage_handle.with_storage(|s| {
+    if gemini_native {
+        state.with_storage(|s| s.setting_set(super::delegation::GEMINI_NATIVE_KEY, &desktop_session.id, &true)).map_err(storage_error)?;
+    }
                         s.baseline_insert(&workspace_id, session.as_ref().map(|s| s.id.as_str()), "session_baseline", base_ref.as_deref(), &manifest)
                     });
                     if let Err(error) = result {

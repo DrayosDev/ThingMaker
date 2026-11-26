@@ -105,6 +105,9 @@ pub struct SessionActorConfig {
     pub launch: AgentLaunch,
     /// Account fixed by the host at attachment creation, not a live global setting.
     pub account_id: Option<String>,
+    /// Whether the host handed this attachment a team to lead (its own
+    /// `team` server). The snapshot says so.
+    pub leads_team: bool,
     pub environment: EnvironmentProfile,
     pub client: ClientIdentity,
     pub timeouts: Timeouts,
@@ -140,6 +143,7 @@ impl SessionActorConfig {
             target,
             launch,
             account_id: None,
+            leads_team: false,
             environment: EnvironmentProfile::trusted_local(),
             client: ClientIdentity::default(),
             timeouts: Timeouts::default(),
@@ -281,6 +285,9 @@ pub struct Snapshot {
     /// which account a turn is charged to and which transcript to look in.
     pub provider: Provider,
     pub account_id: Option<String>,
+    /// Whether this attachment has the tools to lead a team. A session
+    /// without them cannot be given one while it runs.
+    pub leads_team: bool,
     pub web_available: bool,
     /// The agent's own id for the session, once `session/new` has answered.
     pub agent_session_id: Option<String>,
@@ -410,8 +417,10 @@ impl SessionActor {
     /// Launches the agent, negotiates ACP and attaches the session. Returns
     /// only after the attachment is ready or has failed with a typed error.
     pub async fn open(mut config: SessionActorConfig) -> Result<SessionActor, DesktopError> {
-        // Both leaders and reduced worker MCP servers need the native ACP
-        // protocol. The stream-json bridge cannot forward session/new servers.
+        // A Gemini attachment handed session-local MCP servers has to be on
+        // native ACP: the stream-json bridge cannot forward them. The host
+        // hands one only to a Gemini session that leads a team; this keeps
+        // the transport and the servers from disagreeing.
         if !config.mcp_servers.is_empty()
             && let AgentLaunch::Gemini(options) = &mut config.launch
         {
@@ -1890,6 +1899,7 @@ impl ActorState {
     fn snapshot(&self) -> Snapshot {
         Snapshot {
             account_id: self.config.account_id.clone(),
+            leads_team: self.config.leads_team,
             handle: self.handle.clone(),
             provider: self.launch.provider(),
             web_available: crate::integrations::member_resources::WEB_SUPPORTED && self.config.builtin_web,
