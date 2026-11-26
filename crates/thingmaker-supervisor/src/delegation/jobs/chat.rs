@@ -6,6 +6,11 @@ use std::collections::HashSet;
 
 const LEAD: &str = "orchestrator";
 
+/// Workers answering a chat message at once. These jobs are apart from the
+/// orchestrator's own ([`MAX_RUNNING_JOBS`]): a busy chat must not leave it
+/// unable to delegate.
+pub const MAX_CHAT_JOBS: usize = 3;
+
 #[derive(Default)]
 pub(super) struct Room {
     lead: Option<SessionActor>,
@@ -253,7 +258,7 @@ impl Delegation {
                             .get(session)
                             .is_some_and(|team| team.chat.closing.contains(&message.to))
                             && !jobs().any(|r| r.address == message.to && !r.view.status.is_finished())
-                            && jobs().filter(|r| r.view.status.is_active()).count() < MAX_RUNNING_JOBS
+                            && jobs().filter(|r| r.view.chat && r.view.status.is_active()).count() < MAX_CHAT_JOBS
                         {
                             return Err(error);
                         }

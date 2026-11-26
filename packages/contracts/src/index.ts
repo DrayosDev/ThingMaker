@@ -614,6 +614,8 @@ export type JobView = {
   workerClosed?: boolean;
   /** Taken by a worker that had already done an earlier job, keeping its context. */
   warm?: boolean;
+  /** Started by a message from another agent, not by the orchestrator's `delegate`. */
+  chat?: boolean;
 };
 
 /** Emitted by the host on every job change. */

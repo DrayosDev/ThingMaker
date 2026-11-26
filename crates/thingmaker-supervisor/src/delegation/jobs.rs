@@ -283,6 +283,11 @@ pub struct JobView {
     /// Taken by a worker that had already done an earlier job, keeping its context.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub warm: bool,
+    /// Started by a message from another agent, not by the orchestrator's
+    /// `delegate`: it takes none of the orchestrator's job slots and is not
+    /// among the jobs it awaits by default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub chat: bool,
 }
 
 /// What `delegate` takes.
@@ -614,14 +619,20 @@ impl Delegation {
             let root = orchestrator.root.clone();
             let orchestrator_provider = orchestrator.provider;
             let combo = team_for(&orchestrator.combo, &args, orchestrator.provider);
+            // The orchestrator's slots are for the work it gave out. A job a
+            // chat message started has a smaller allowance of its own.
             let running = state
                 .order
                 .get(session)
                 .into_iter()
                 .flatten()
-                .filter(|id| state.jobs.get(*id).is_some_and(|record| record.view.status.is_active()))
+                .filter(|id| state.jobs.get(*id).is_some_and(|record| record.view.status.is_active() && record.view.chat == chat_message.is_some()))
                 .count();
-            if running >= MAX_RUNNING_JOBS {
+            if chat_message.is_some() {
+                if running >= chat::MAX_CHAT_JOBS {
+                    return Err(format!("{running} workers are already answering chat messages."));
+                }
+            } else if running >= MAX_RUNNING_JOBS {
                 return Err(format!("{running} jobs are already running; await some before delegating more."));
             }
             let mut resume = None;
@@ -715,6 +726,7 @@ impl Delegation {
                 finished_at_unix_ms: None,
                 worker_closed: resume.is_some(),
                 warm: warm.is_some(),
+                chat: chat_message.is_some(),
             };
             let token = reuse.is_none().then(|| uuid::Uuid::new_v4().simple().to_string());
             if let Some(token) = &token {
@@ -1287,7 +1299,9 @@ impl Delegation {
     /// means every unfinished job in the session.
     pub async fn await_jobs(&self, session: &str, ids: &[String], timeout: Duration, any: bool) -> Result<Vec<JobView>, String> {
         let ids: Vec<String> = if ids.is_empty() {
-            self.jobs(session).into_iter().filter(|job| !job.status.is_finished()).map(|job| job.id).collect()
+            // The jobs the orchestrator gave out: one a chat message started
+            // is not its to wait for.
+            self.jobs(session).into_iter().filter(|job| !job.status.is_finished() && !job.chat).map(|job| job.id).collect()
         } else {
             for id in ids {
                 self.job(session, id)?;
@@ -1346,7 +1360,7 @@ impl Delegation {
                 })
             })
             .collect();
-        let running = state.order.get(session).into_iter().flatten().filter(|id| state.jobs.get(*id).is_some_and(|record| !record.view.status.is_finished())).count();
+        let running = state.order.get(session).into_iter().flatten().filter(|id| state.jobs.get(*id).is_some_and(|record| !record.view.status.is_finished() && !record.view.chat)).count();
         Ok(serde_json::json!({
             "orchestrator": orchestrator.provider.as_str(),
             "workers": workers,

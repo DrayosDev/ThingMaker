@@ -576,3 +576,40 @@ async fn an_empty_continue_job_starts_a_fresh_worker_not_a_follow_up() {
     assert!(!launcher.launched.lock().unwrap().is_empty());
     delegation.release("blank").await;
 }
+
+/// Waits for `ready` to say yes, up to ten seconds.
+async fn until(mut ready: impl FnMut() -> bool) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !ready() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("it happened within ten seconds");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_job_a_chat_message_started_takes_none_of_the_orchestrators_slots() {
+    let Some((service, _, _)) = service_with_flags(&[], &["--slow=2", "--no-steer"]) else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let token = service.register("lead", Provider::Claude, dir.path().into(), team());
+    let lead = service.caller_for_token(&token).unwrap();
+    let sonnet = |task: &str| DelegateArgs { task: task.into(), worker: Some("sonnet".into()), ..Default::default() };
+    let first = service.delegate("lead", sonnet("Read the brief")).unwrap();
+    assert!(!first.chat);
+    service.await_jobs("lead", std::slice::from_ref(&first.id), Duration::from_secs(30), false).await.unwrap();
+    service.send_chat(&lead, &first.id, "Which file?", None).unwrap();
+    until(|| service.jobs("lead").iter().any(|job| job.chat && job.status == JobStatus::Running)).await;
+
+    // The worker is answering, and the orchestrator neither counts nor awaits it.
+    assert_eq!(service.list_workers("lead").unwrap()["runningJobs"], 0);
+    let started = std::time::Instant::now();
+    assert!(service.await_jobs("lead", &[], Duration::from_secs(20), false).await.unwrap().is_empty());
+    assert!(started.elapsed() < Duration::from_secs(1), "nothing of its own to wait for");
+    let own: Vec<JobView> = (0..6).map(|n| service.delegate("lead", sonnet(&format!("Task {n}"))).expect("all six slots are free")).collect();
+    let refused = service.delegate("lead", sonnet("One too many")).unwrap_err();
+    assert!(refused.contains("6 jobs are already running"), "{refused}");
+    assert!(service.jobs("lead").iter().any(|job| job.chat && !job.status.is_finished()), "the chat job was running all along");
+    assert_eq!(own.len(), 6);
+    service.release("lead").await;
+}

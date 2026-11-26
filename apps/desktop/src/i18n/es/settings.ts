@@ -371,6 +371,7 @@ export const settings: Record<string, string> = {
   "No messages yet.": "Aún no hay mensajes.",
   "Delivered": "Entregado",
   "Pending": "Pendiente",
+  "answering a team message": "responde a un mensaje del equipo",
   "Delegated jobs": "Trabajos delegados",
   "Team: {summary} Change it from the team button beside the model picker.": "Equipo: {summary} Cámbialo con el botón de equipo junto al selector de modelo.",
   "The orchestrator has not delegated anything yet. Jobs appear here as it calls the team": "El orquestador aún no ha delegado nada. Los trabajos aparecen aquí a medida que usa la herramienta",
