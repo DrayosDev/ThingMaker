@@ -389,13 +389,16 @@ fn source_record(storage: &Storage, workspace: &str, mode: &OpenRequestMode, sou
 /// The account a session about to open is pinned to, if any.
 ///
 /// One asked for is checked and refused when it is not an account of this
-/// provider: nothing falls back to another identity. One kept from before
-/// (`recorded` is the session being reopened, or the one being copied) is
-/// used while the account still exists; once it has been removed the session
-/// follows the active account again, since its history is shared.
+/// provider: nothing falls back to another identity. Asking for the active
+/// account is not a pin: the session goes on following it, which is what
+/// moving a session to the account just made active means. One kept from
+/// before (`recorded` is the session being reopened, or the one being
+/// copied) is used while the account still exists; once it has been removed
+/// the session follows the active account again, since its history is shared.
 fn pinned_account(state: &AppState, provider: Provider, requested: Option<&str>, recorded: Option<&SessionRecord>) -> CommandResult<Option<String>> {
     if let Some(requested) = requested {
-        return state.session_account_id(provider, Some(requested)).map(Some);
+        let account = state.session_account_id(provider, Some(requested))?;
+        return Ok(Some(account).filter(|account| *account != state.active_account(provider)));
     }
     let Some(row) = recorded else { return Ok(None) };
     let kept = state.with_storage(|s| s.setting_get::<String>(SESSION_ACCOUNT, &row.id)).map_err(storage_error)?;
@@ -1401,6 +1404,12 @@ mod recovery_tests {
         let moved = pinned_account(&state, Provider::Codex, Some("spare"), Some(&row)).unwrap();
         keep_pin(&state, &row.id, "handle", Provider::Codex, moved.as_deref()).unwrap();
         assert_eq!(pinned_account(&state, Provider::Codex, None, Some(&row)).unwrap().as_deref(), Some("spare"));
+        // Moving it to the active account is no pin at all: it follows that one again.
+        let followed = pinned_account(&state, Provider::Codex, Some("default"), Some(&row)).unwrap();
+        assert!(followed.is_none());
+        keep_pin(&state, &row.id, "handle", Provider::Codex, followed.as_deref()).unwrap();
+        assert!(pinned_account(&state, Provider::Codex, None, Some(&row)).unwrap().is_none());
+        keep_pin(&state, &row.id, "handle", Provider::Codex, Some("spare")).unwrap();
         // An account named but not this provider's is refused, not replaced.
         assert!(pinned_account(&state, Provider::Codex, Some("missing"), Some(&row)).is_err());
 

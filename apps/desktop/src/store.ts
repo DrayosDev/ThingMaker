@@ -675,8 +675,13 @@ export type PendingProvider = { resources?: WorkerSlot["resources"]; provider: P
 /** The session a fork is copied from: open (`key`) or only in the list. */
 export type ForkSource = { workspaceId: string; agentSessionId: string; provider: Provider; key?: string };
 
-/** A session that carries on another's conversation on a different provider. */
-export type Continuation = { fromAgentSessionId: string; fromProvider: Provider; pendingBrief?: string; archive?: ContinuityArchive; target?: { workspaceId: string; provider: Provider; accountId: string } };
+/**
+ * A session that carries on another's conversation on a different provider.
+ * `briefPending` says a prepared brief is waiting for the session's first
+ * message; the brief itself is kept apart (see `pendingBriefKey`).
+ * `pendingBrief` is how development builds kept it, and is never written.
+ */
+export type Continuation = { fromAgentSessionId: string; fromProvider: Provider; briefPending?: boolean; pendingBrief?: string; archive?: ContinuityArchive; target?: { workspaceId: string; provider: Provider; accountId: string } };
 
 /** A durable id can coincide across accounts/providers. Never inject another
  * account's pending text or show its private archive location. */
@@ -685,9 +690,13 @@ export function sessionContinuation(session: LiveSession | undefined, continuati
   if (!entry || !session) return undefined;
   // Older records have no trustworthy account/workspace provenance. A link
   // without private context is safe to keep; pending text needs a fresh handoff.
-  if (!entry.target) return entry.archive || entry.pendingBrief ? undefined : entry;
-  return entry.target.workspaceId === session.workspaceId && entry.target.provider === session.snapshot.provider
-    && entry.target.accountId === (session.snapshot.accountId ?? "default") ? entry : undefined;
+  if (!entry.target) return entry.archive || entry.pendingBrief || entry.briefPending ? undefined : entry;
+  if (entry.target.workspaceId !== session.workspaceId || entry.target.provider !== session.snapshot.provider) return undefined;
+  if (entry.target.accountId === (session.snapshot.accountId ?? "default")) return entry;
+  // The same conversation, moved to another account: the link back to the
+  // earlier one is still its own. What was prepared for the first account
+  // (the archive, a waiting brief) stays with that account.
+  return { fromAgentSessionId: entry.fromAgentSessionId, fromProvider: entry.fromProvider };
 }
 
 function continuationTarget(session: LiveSession) {
@@ -898,7 +907,7 @@ function launchDefaults(defaults: SessionDefaults, provider: Provider): { model?
  * override the remembered ones, a team, and a first message that goes out as
  * soon as the agent is ready.
  */
-export type NewSessionLaunch = { resources?: WorkerSlot["resources"]; model?: string; reasoningEffort?: string; combo?: Combo; message?: string; attachments?: AttachmentSnapshot[] };
+export type NewSessionLaunch = { resources?: WorkerSlot["resources"]; model?: string; reasoningEffort?: string; combo?: Combo; message?: string; attachments?: AttachmentSnapshot[]; /** The account to open the session on, instead of the one it was on or the active one. */ accountId?: string };
 
 /** The adapter's alias for its current Opus. */
 const CLAUDE_DEFAULT_MODEL = "opus";
@@ -2846,6 +2855,7 @@ export const useStore = create<State>((set, get) => ({
       set({ providerModels: { ...get().providerModels, [provider]: models } });
       return models;
     } catch {
+        ...(launch?.accountId ? { accountId: launch.accountId } : {}),
       return [];
     }
   },
@@ -3954,7 +3964,9 @@ export const useStore = create<State>((set, get) => ({
     } finally {
       set({ busy: null });
     }
-    await get().openSession(session.workspaceId, { mode: "resume", session_id: agentSessionId }, provider);
+    // Named, because a session that was pinned to an account would otherwise
+    // be reopened on that one again.
+    await get().openSession(session.workspaceId, { mode: "resume", session_id: agentSessionId }, provider, { accountId: id });
   },
 
   async finishGeminiSignIn() {

@@ -144,3 +144,35 @@ describe("preparing a continuation after quota exhaustion", () => {
     expect(useStore.getState().drafts.source).toBe("Do not send this draft yet");
   });
 });
+
+  it("prepares the continuation even when no preference can be written", async () => {
+    vi.mocked(api.prefSet).mockRejectedValue({ code: "LIMIT_EXCEEDED", message: "preference exceeds 256 KiB", retry: "never" });
+    expect(await useStore.getState().prepareQuotaContinuation("source", { provider: "codex", accountId: "work" })).toBe("next");
+    const state = useStore.getState();
+    expect(state.error).toBeNull();
+    expect(state.sideBrief.next).toContain("Finish the pending feature");
+    expect(state.continuations["agent-next"]).toMatchObject({ fromAgentSessionId: "agent-source", briefPending: true });
+    expect(api.sessionStop).not.toHaveBeenCalled();
+  });
+});
+
+describe("moving a session to another account", () => {
+  it("names the account when it reopens the session, so a pin to the old one does not win", async () => {
+    const openSession = vi.fn(async () => undefined);
+    useStore.setState({ openSession, loadProviders: vi.fn(async () => undefined), refreshUsage: vi.fn(async () => undefined), accounts: { codex: [
+      { id: "default", provider: "codex", isDefault: true, active: true, label: "Main" },
+      { id: "work", provider: "codex", isDefault: false, active: false, label: "Work" },
+    ] } } as never);
+    const source = useStore.getState().sessions.source!;
+    useStore.setState({ sessions: { source: { ...source, projection: { ...source.projection, foreground: "idle" } } } });
+    await useStore.getState().setActiveAccount("codex", "work", "source");
+    expect(api.accountSetActive).toHaveBeenCalledWith("codex", "work");
+    expect(api.sessionStop).toHaveBeenCalledWith(sourceHandle);
+    expect(openSession).toHaveBeenCalledWith("workspace", { mode: "resume", session_id: "agent-source" }, "codex", { accountId: "work" });
+  });
+
+  it("hands the account to the host on that resume", async () => {
+    vi.spyOn(api, "sessionListOpen").mockResolvedValue([]);
+    await useStore.getState().openSession("workspace", { mode: "resume", session_id: "agent-elsewhere" }, "codex", { accountId: "work" });
+    expect(api.sessionOpen).toHaveBeenCalledWith(expect.objectContaining({ mode: { mode: "resume", session_id: "agent-elsewhere" }, accountId: "work" }));
+  });
