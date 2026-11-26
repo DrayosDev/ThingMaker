@@ -1,9 +1,19 @@
 # Gemini ordinary team leadership
 
-Gemini sessions receiving session-local MCP servers use the official `agy acp`
-JSON-RPC transport. Plain sessions with no injected MCP retain the existing
-stream-json bridge. Workers also use native ACP when given their reduced team
-server. `SessionActor::open` selects the transport before spawning the process.
+A Gemini session that leads a team uses the official `agy acp` JSON-RPC
+transport, the only mode that takes the session's own `team` server. Every other
+Gemini session keeps the stream-json bridge: one opened without a team, every
+conversation from before, and every Gemini worker.
+
+A new session is opened natively when it starts with at least one helper. The
+transport is recorded with the session, and a reopened session keeps the one it
+began on, so a conversation never moves between the two. A session on the bridge
+cannot be given a team while it runs; the interface keeps the team and continues
+the next message in a new Gemini session that leads it, as a change of provider
+would. A Gemini worker gets no team server: it takes part in the agent chat
+through `TEAM_CHAT` lines in its replies, and the server withholds the chat tools
+from it, so a member has one way into the chat and the team's agent chat setting
+decides for both.
 
 Native sessions pass MCP entries unchanged through `session/new` and
 `session/load`, including the per-attachment relay token. They never install a
@@ -54,11 +64,15 @@ continuation. Unknown usage and generic throttling do not trigger the offer.
 The user selects a signed-in account or provider and prepares a fresh session;
 opening it never submits a prompt or changes the provider's global account.
 The native request pins `accountId`, and snapshots report the actual pinned
-account. Invalid or removed accounts fail without selecting another identity.
+account. Invalid accounts fail without selecting another identity. The pin is
+kept with the session: a later reopening, after a restart too, runs on it again,
+its workers on the same provider run on it, and a copy of the session inherits
+it. Asking for the account that is active is not a pin. Once a pinned account
+has been removed the session follows the active one again.
 
 The destination receives the team, editable draft, attachments and mentions.
 Its first message carries a recent-conversation summary with a 24,000-character
-text budget. The summary remains pending in preferences until a send is accepted.
+text budget. The summary waits in a preference of its own until a send is accepted.
 The original session and composer remain available. Jobs, background activity,
 pending messages and active Big Thing records block this chat-only handoff.
 Provider-wide readings are used only for sessions on the corresponding active
