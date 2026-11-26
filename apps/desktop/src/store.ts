@@ -1248,7 +1248,8 @@ export function switchesSession(session: { snapshot: Parameters<typeof isLocalCh
   if (harness && !isLocalChat(snapshot)) {
     const current = session?.localSetup;
     if (!current || current.model !== pending.model) return true;
-    return (["skills", "mcps"] as const).some((key) => {
+    if ((current.resources?.referencedSkills ?? false) !== (pending.resources?.referencedSkills ?? false)) return true;
+    return (["skills", "mcps", "excludedSkills"] as const).some((key) => {
       const active = new Set(current.resources?.[key]);
       const desired = new Set(pending.resources?.[key]);
       return active.size !== desired.size || [...active].some((id) => !desired.has(id));

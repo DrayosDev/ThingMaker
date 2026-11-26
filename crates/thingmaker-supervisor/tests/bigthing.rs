@@ -307,7 +307,7 @@ async fn a_running_goal_whose_session_is_not_open_reopens_it_and_carries_on() {
     let Some(fixture) = fixture_with(&["--follow-plan"]) else { return };
     let (goal_id, live) = fixture.goal(1).await;
     let resources = thingmaker_supervisor::integrations::member_resources::ResourceSelection {
-        skills: vec!["skill:user:test".into()], mcps: vec![],
+        skills: vec!["skill:user:test".into()], mcps: vec![], ..Default::default()
     };
     let team = json!({"orchestrator":{"provider":"claude","resources":resources},"combo":{}});
     let edit = thingmaker_supervisor::storage::odyssey::GoalEdit { team: Some(Some(team)), ..Default::default() };

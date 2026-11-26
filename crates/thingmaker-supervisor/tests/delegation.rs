@@ -347,7 +347,7 @@ async fn changing_a_members_resources_invalidates_warm_sessions_and_old_followup
     delegation.register("resources", Provider::Claude, root.path().to_path_buf(), combo.clone());
     let first = delegation.delegate("resources", image_task()).unwrap();
     delegation.await_jobs("resources", std::slice::from_ref(&first.id), Duration::from_secs(10), false).await.unwrap();
-    combo.workers[0].resources = Some(ResourceSelection { skills: vec!["skill:user:art".into()], mcps: vec![] });
+    combo.workers[0].resources = Some(ResourceSelection { skills: vec!["skill:user:art".into()], mcps: vec![], ..Default::default() });
     delegation.set_combo("resources", combo.clone()).unwrap();
     let error = delegation.delegate("resources", DelegateArgs { task: "Continue".into(), continue_job: Some(first.id), ..Default::default() }).unwrap_err();
     assert!(error.contains("configuration changed"));

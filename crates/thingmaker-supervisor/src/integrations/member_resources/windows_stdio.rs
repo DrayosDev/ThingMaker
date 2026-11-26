@@ -115,7 +115,7 @@ mod tests {
             let id = format!("mcp:user:{name}");
             let entry = catalog.entries.iter().find(|entry| entry.id == id).unwrap();
             assert_eq!(entry.available, name == "project");
-            let selection = super::super::ResourceSelection { skills: vec![], mcps: vec![id] };
+            let selection = super::super::ResourceSelection { skills: vec![], mcps: vec![id], ..Default::default() };
             assert_eq!(super::super::resolve(&catalog, &selection, &env).is_ok(), name == "project");
         }
     }

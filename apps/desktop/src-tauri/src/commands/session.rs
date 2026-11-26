@@ -1488,7 +1488,7 @@ mod recovery_tests {
         let source = db.workspace_upsert("source", "source", "source").unwrap();
         let dest = db.workspace_upsert("destination", "destination", "destination").unwrap();
         let row = db.session_upsert(&source.id, "thread", SessionOrigin::Desktop, Provider::Local).unwrap();
-        let selection = ResourceSelection { skills: vec!["skill:user:art".into()], mcps: vec![] };
+        let selection = ResourceSelection { skills: vec!["skill:user:art".into()], mcps: vec![], ..Default::default() };
         let setup = LocalSessionSetup { model: "@agent/@codex/gemma".into(), resources: Some(selection.clone()) };
         db.setting_set("localSessionSetup", &row.id, &setup).unwrap();
         db.session_upsert(&dest.id, "thread", SessionOrigin::Desktop, Provider::Local).unwrap();
@@ -1512,7 +1512,7 @@ mod recovery_tests {
         let db = Storage::open(&path).unwrap();
         let source = db.workspace_upsert("source", "source", "a").unwrap().id;
         let dest = db.workspace_upsert("dest", "dest", "b").unwrap().id;
-        let selected = ResourceSelection { skills: vec!["skill:exact".into()], mcps: vec![] };
+        let selected = ResourceSelection { skills: vec!["skill:exact".into()], mcps: vec![], ..Default::default() };
         let empty = ResourceSelection::default();
         for (id, provider, policy) in [("lead", Provider::Claude, &empty), ("worker", Provider::Codex, &selected)] {
             db.session_upsert_with_resources(&source, id, SessionOrigin::Desktop, provider, Some(policy)).unwrap();

@@ -26,6 +26,14 @@ pub use skill_dependencies::McpDependency;
 pub struct ResourceSelection {
     pub skills: Vec<String>,
     pub mcps: Vec<String>,
+    /// Also load the skills the selected ones refer to (see `skill_links`).
+    /// Absent means no, and is stored as absent: a team saved before this
+    /// existed loads exactly what it selected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub referenced_skills: bool,
+    /// Referenced skills the person took out again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_skills: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -45,6 +53,7 @@ pub struct ResourceEntry {
     pub mcp_dependencies: Vec<McpDependency>,
     pub dependency_notes: Vec<String>,
     /// Ids of the skills this skill refers to (direct only; see `skill_links`).
+    /// Shown in the selector; loaded only when the selection asks for it.
     pub skill_dependencies: Vec<String>,
     /// Whose skill or server this is: claude, codex, gemini or thingmaker.
     pub provider: Option<String>,
@@ -707,15 +716,16 @@ pub fn resolve(catalog: &ResourceCatalog, selection: &ResourceSelection, environ
     let mut revisions = BTreeMap::new();
     let mut skill_sources = Vec::new();
     let mut selected_paths = std::collections::BTreeSet::new();
-    for entry in catalog.entries.iter().filter(|entry| entry.kind == "skill" && selection.skills.contains(&entry.id)) {
+    // Only the picked skills are saved; the ones they refer to come along
+    // when the selection asks, and need their connections like any other.
+    let skill_ids = expand_skills(catalog, selection);
+    for entry in catalog.entries.iter().filter(|entry| entry.kind == "skill" && skill_ids.contains(&entry.id)) {
         for dependency in entry.mcp_dependencies.iter().filter(|dependency| dependency.required) {
             if !dependency.mcp_ids.iter().any(|id| selection.mcps.contains(id)) {
                 return Err(DesktopError::not_ready(format!("Skill {} requires MCP {}. Enable a matching connection in this member's selector.", entry.name, dependency.name)));
             }
         }
     }
-    // Skills the selection refers to come along; only explicit ones are saved.
-    let skill_ids = expand_skills(catalog, &selection.skills);
     for (kind, ids) in [("skill", &skill_ids), ("mcp", &selection.mcps)] {
         for id in ids {
             if !WEB_SUPPORTED && kind == "mcp" && id == BUILTIN_WEB { continue; }
@@ -847,13 +857,13 @@ mod tests {
         let found = catalog(temp.path(), &config, None).unwrap();
         let empty = resolve(&found, &ResourceSelection::default(), &HashMap::new()).unwrap();
         assert!(empty.skills.is_empty() && empty.mcps.is_empty());
-        let selected = ResourceSelection { skills: vec![], mcps: vec!["mcp:user:files".into()] };
+        let selected = ResourceSelection { skills: vec![], mcps: vec!["mcp:user:files".into()], ..Default::default() };
         assert!(resolve(&found, &selected, &HashMap::new()).is_err());
         let resolved = resolve(&found, &selected, &HashMap::from([("TOKEN".into(), "credential".into())])).unwrap();
         assert_eq!(resolved.mcps["files"]["env"]["TOKEN"], "credential");
         let changed = resolve(&found, &selected, &HashMap::from([("TOKEN".into(), "rotated".into())])).unwrap();
         assert_ne!(resolved.revision, changed.revision);
-        let missing = ResourceSelection { skills: vec!["skill:project:missing".into()], mcps: vec![] };
+        let missing = ResourceSelection { skills: vec!["skill:project:missing".into()], mcps: vec![], ..Default::default() };
         assert!(resolve(&found, &missing, &HashMap::new()).is_err());
     }
 
@@ -866,7 +876,7 @@ mod tests {
         let found = catalog(home.path(), &claude, None).unwrap().local_only();
         let skill = found.entries.iter().find(|e| e.id == "skill:user:web-scout").unwrap();
         assert!(skill.mcp_dependencies.iter().any(|dep| dep.mcp_ids.iter().any(|id| id == BUILTIN_WEB)));
-        let mut chosen = ResourceSelection { skills: vec![skill.id.clone()], mcps: vec![] };
+        let mut chosen = ResourceSelection { skills: vec![skill.id.clone()], mcps: vec![], ..Default::default() };
         let without = resolve(&found, &chosen, &HashMap::new()).unwrap();
         assert!(!without.builtin_web);
         chosen.mcps.push(BUILTIN_WEB.into());
@@ -890,7 +900,7 @@ mod tests {
         write(&config.join("settings.json"), r#"{"enabledPlugins":{"art@market":true}}"#);
         write(&config.join("plugins/installed_plugins.json"), &json!({"version":2,"plugins":{"art@market":[{"scope":"user","installPath":plugin}]}}).to_string());
         let found = catalog(temp.path(), &config, Some(&root)).unwrap();
-        let selected = ResourceSelection { skills: vec![], mcps: vec!["mcp:local:same".into(), "mcp:art@market:paint".into()] };
+        let selected = ResourceSelection { skills: vec![], mcps: vec!["mcp:local:same".into(), "mcp:art@market:paint".into()], ..Default::default() };
         let resolved = resolve(&found, &selected, &HashMap::new()).unwrap();
         assert_eq!(resolved.mcps["same"]["command"], "local");
         assert_eq!(Path::new(resolved.mcps["plugin:art:paint"]["args"][0].as_str().unwrap()), plugin.join("server.js"));
@@ -907,7 +917,7 @@ mod tests {
         write(&home.join(".claude.json"), r#"{"mcpServers":{"remote":{"type":"http","url":"https://example.test"},"loopback":{"type":"http","url":"http://localhost:8800"}}}"#);
         let found = catalog(home, &home.join(".claude"), None).unwrap().local_only();
         assert!(!found.entries.iter().find(|entry| entry.id == "mcp:user:remote").unwrap().available);
-        let selection = ResourceSelection { skills: vec!["skill:user:probe".into()], mcps: vec!["mcp:user:loopback".into()] };
+        let selection = ResourceSelection { skills: vec!["skill:user:probe".into()], mcps: vec!["mcp:user:loopback".into()], ..Default::default() };
         let mut claude = ClaudeLaunchOptions::new(home, "node", vec![]);
         claude.local = Some(LocalTarget { kind: LocalKind::Agent, model: "m".into(), served: "m".into(), window: 16384, home: home.into() });
         let mut codex = CodexLaunchOptions::new(home, "codex");
@@ -932,7 +942,7 @@ mod tests {
         let directory = home.join(".claude/skills/helper");
         write(&directory.join("SKILL.md"), "# Helper");
         let found = catalog(home, &home.join(".claude"), None).unwrap().local_only();
-        let selection = ResourceSelection { skills: vec!["skill:user:helper".into()], mcps: vec![] };
+        let selection = ResourceSelection { skills: vec!["skill:user:helper".into()], mcps: vec![], ..Default::default() };
         let snapshot = || resolve(&found, &selection, &HashMap::new()).unwrap();
         let original = snapshot().revision;
         let script = directory.join("scripts/helper.py");
@@ -963,7 +973,7 @@ mod tests {
         // Resolution validates the final definition independently of the catalog preview.
         let entry = catalog.entries.iter_mut().find(|e| e.id == "mcp:user:loop").unwrap();
         entry.config["url"] = json!("${MCP_URL}");
-        let selection = ResourceSelection { skills: vec![], mcps: vec![entry.id.clone()] };
+        let selection = ResourceSelection { skills: vec![], mcps: vec![entry.id.clone()], ..Default::default() };
         let vars = HashMap::from([("MCP_URL".into(), "https://example.com".into())]);
         assert!(resolve(&catalog, &selection, &vars).is_err());
     }
@@ -1003,7 +1013,7 @@ mod tests {
         for id in ["skill:agents-user:art", "skill:codex-user:art", "skill:agents-project:art", "skill:codex-project:art", "skill:codex-system:art"] {
             assert!(found.entries.iter().any(|entry| entry.id == id && entry.available));
         }
-        let chosen = ResourceSelection { skills: vec!["skill:agents-user:art".into(), "skill:codex-project:art".into()], mcps: vec![] };
+        let chosen = ResourceSelection { skills: vec!["skill:agents-user:art".into(), "skill:codex-project:art".into()], mcps: vec![], ..Default::default() };
         let resolved = resolve(&found, &chosen, &HashMap::new()).unwrap();
         assert_ne!(resolved.skills[0], resolved.skills[1], "same-named skills get separate bridge namespaces");
         let prepared = prepare_claude_skills(&resolved).unwrap().unwrap();
@@ -1025,10 +1035,10 @@ mod tests {
         let found = catalog(temp.path(), &temp.path().join(".claude"), None).unwrap();
         assert!(found.entries.iter().filter(|entry| entry.kind == "mcp").all(|entry| entry.available));
         let environment = HashMap::from([("PAINT_TOKEN".into(), "not-for-renderer".into())]);
-        let resolved = resolve(&found, &ResourceSelection { skills: vec![], mcps: vec!["mcp:codex-user:paint".into()] }, &environment).unwrap();
+        let resolved = resolve(&found, &ResourceSelection { skills: vec![], mcps: vec!["mcp:codex-user:paint".into()], ..Default::default() }, &environment).unwrap();
         assert_eq!(resolved.mcps["paint"]["headers"]["Authorization"], "Bearer not-for-renderer");
         assert!(!serde_json::to_string(&found).unwrap().contains("not-for-renderer"));
-        assert!(resolve(&found, &ResourceSelection { skills: vec![], mcps: vec!["mcp:user:paint".into(), "mcp:codex-user:paint".into()] }, &environment).is_err());
+        assert!(resolve(&found, &ResourceSelection { skills: vec![], mcps: vec!["mcp:user:paint".into(), "mcp:codex-user:paint".into()], ..Default::default() }, &environment).is_err());
     }
 
     #[test]
@@ -1043,7 +1053,7 @@ mod tests {
         let found = catalog(&home, &home.join(".claude"), Some(&root)).unwrap();
         assert!(found.entries.iter().find(|entry| entry.id == "mcp:codex-user:paint").unwrap().available, "the user's own server keeps its place");
         assert!(found.entries.iter().all(|entry| !entry.id.contains("project-parent")), "no folder above a non-repository workspace is a project folder");
-        let resolved = resolve(&found, &ResourceSelection { skills: vec![], mcps: vec!["mcp:codex-user:paint".into()] }, &HashMap::new()).unwrap();
+        let resolved = resolve(&found, &ResourceSelection { skills: vec![], mcps: vec!["mcp:codex-user:paint".into()], ..Default::default() }, &HashMap::new()).unwrap();
         assert_eq!(resolved.mcps["paint"]["command"], "paint");
         // Nor is $HOME itself, when it is the workspace.
         write(&home.join(".codex/skills/art/SKILL.md"), "---\nname: art\ndescription: Draw\n---\n");
@@ -1083,7 +1093,7 @@ mod tests {
         assert_eq!(entry("mcp:project:local").target.as_deref(), Some("mcp.example.test"));
         let public = serde_json::to_string(&found).unwrap();
         assert!(!public.contains("secret"), "{public}");
-        assert!(resolve(&found, &ResourceSelection { skills: vec![], mcps: vec!["mcp:project:committed".into()] }, &HashMap::new()).is_err());
+        assert!(resolve(&found, &ResourceSelection { skills: vec![], mcps: vec!["mcp:project:committed".into()], ..Default::default() }, &HashMap::new()).is_err());
         write(&config.join("settings.json"), r#"{"enableAllProjectMcpServers":true}"#);
         let all = catalog(&home, &config, Some(&root)).unwrap();
         assert!(all.entries.iter().find(|entry| entry.id == "mcp:project:committed").unwrap().available);

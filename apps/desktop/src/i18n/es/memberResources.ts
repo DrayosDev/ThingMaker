@@ -46,5 +46,11 @@ export const memberResources: Record<string, string> = {
   "Uses {skills}": "Usa {skills}",
   "Included by {skills}": "Incluida por {skills}",
   "Keep selected": "Mantener seleccionada",
+  "Leave out": "Dejar fuera",
+  "Left out. {skills} refers to it.": "Queda fuera. {skills} hace referencia a ella.",
+  "Include again": "Volver a incluir",
+  "Also load the skills that the selected ones refer to": "Cargar también las skills a las que hacen referencia las seleccionadas",
+  "Each one says below which skill brings it in, and can be left out.": "Cada una indica abajo qué skill la trae, y se puede dejar fuera.",
+  "Off: this member loads only what is ticked.": "Desactivado: este miembro solo carga lo marcado.",
   "Same skill as ThingMaker's own copy": "La misma skill que la copia propia de ThingMaker",
 };

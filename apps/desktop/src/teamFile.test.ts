@@ -39,6 +39,21 @@ describe("exporting teams", () => {
     malformed.teams[0].combo.workers[0].resources = { skills: "all", mcps: [] };
     expect(() => readTeamsFile(JSON.stringify(malformed))).toThrow("Invalid member resource selection");
   });
+  it("carries a member's choice to load referenced skills, and writes nothing for a member without it", () => {
+    const team = preset("Referring");
+    const asked = { skills: ["skill:user:ship"], mcps: [], referencedSkills: true, excludedSkills: ["skill:user:lint"] };
+    team.combo.workers[0]!.resources = asked;
+    expect(readTeamsFile(exportTeams([team])).teams[0]?.combo.workers[0]?.resources).toEqual(asked);
+    // Not asked for: the file is the one an earlier ThingMaker wrote and reads.
+    team.combo.workers[0]!.resources = { skills: ["skill:user:ship"], mcps: [], referencedSkills: false, excludedSkills: [] };
+    expect(JSON.parse(exportTeams([team])).teams[0].combo.workers[0].resources).toEqual({ skills: ["skill:user:ship"], mcps: [], referencedSkills: false, excludedSkills: [] });
+    expect(readTeamsFile(exportTeams([team])).teams[0]?.combo.workers[0]?.resources).toEqual({ skills: ["skill:user:ship"], mcps: [] });
+    for (const wrong of [{ referencedSkills: "yes" }, { excludedSkills: "all" }, { excludedSkills: [7] }, { everySkill: true }]) {
+      const malformed = JSON.parse(exportTeams([team]));
+      malformed.teams[0].combo.workers[0].resources = { skills: [], mcps: [], ...wrong };
+      expect(() => readTeamsFile(JSON.stringify(malformed)), JSON.stringify(wrong)).toThrow("Invalid member resource selection");
+    }
+  });
   it("round-trips the local lead harness and its resources", () => {
     const team = preset("Local");
     team.orchestrator = { provider: "local", model: "@agent/@codex/model", resources: { skills: [], mcps: ["mcp:user:local"] } };

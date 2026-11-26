@@ -553,7 +553,12 @@ export type WorkerSlot = {
   resources?: MemberResourceSelection;
 };
 
-export type MemberResourceSelection = { skills: string[]; mcps: string[] };
+/** `skills` and `mcps` are what the person ticked. `referencedSkills` also
+ *  loads the skills those refer to (a catalog entry's `skillDependencies`,
+ *  followed through), except the `excludedSkills` the person took out again.
+ *  Both are left out when unused, so a selection saved before they existed is
+ *  stored, compared and launched exactly as it was. */
+export type MemberResourceSelection = { skills: string[]; mcps: string[]; referencedSkills?: boolean; excludedSkills?: string[] };
 export type MemberMcpDependency = { name: string; evidence: "declared" | "reference"; required: boolean; mcpIds: string[] };
 export type MemberResourceEntry = { id: string; kind: "skill" | "mcp"; name: string; description: string; group: string; source?: string; target?: string; available: boolean; problem: string | null; mcpDependencies?: MemberMcpDependency[]; dependencyNotes?: string[] };
 export type MemberResourceCatalog = { entries: MemberResourceEntry[]; notes: string[]; problem: string | null };

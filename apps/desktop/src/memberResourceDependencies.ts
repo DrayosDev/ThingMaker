@@ -46,15 +46,21 @@ export function resourceGroupLabel(group: string): string {
   return `${t("Plugin")} · ${group.slice(7)}`;
 }
 
-/** Skills reached from the explicit selection through `skillDependencies`
- * (transitively, available skills only), each mapped to the explicit skills
- * that pull it in. Explicit skills are never listed: the stored selection holds
- * only what the person ticked, and these are derived again on every change. */
-export function impliedSkills(entries: CatalogEntry[], explicit: string[]): Map<string, string[]> {
+/** What a selection that asks for referenced skills adds to the ticked ones,
+ * the way the launch does it: every available skill reached from a ticked one
+ * through `skillDependencies`, each mapped to the ticked skills it comes
+ * from. A skill the person took out is `removed` instead, with the same
+ * mapping, and nothing is reached through it. Ticked skills are in neither:
+ * the stored selection holds what the person ticked, and these are derived
+ * again on every change. A selection that does not ask adds nothing. */
+export function referencedSkills(entries: CatalogEntry[], selection: MemberResourceSelection): { included: Map<string, string[]>; removed: Map<string, string[]> } {
+  const included = new Map<string, string[]>();
+  const removed = new Map<string, string[]>();
+  if (!selection.referencedSkills) return { included, removed };
   const skills = new Map(entries.filter((entry) => entry.kind === "skill").map((entry) => [entry.id, entry]));
-  const chosen = new Set(explicit);
-  const implied = new Map<string, string[]>();
-  for (const root of explicit) {
+  const chosen = new Set(selection.skills);
+  const excluded = new Set(selection.excludedSkills);
+  for (const root of selection.skills) {
     const seen = new Set([root]);
     const pending = [...(skills.get(root)?.skillDependencies ?? [])];
     while (pending.length > 0) {
@@ -62,9 +68,18 @@ export function impliedSkills(entries: CatalogEntry[], explicit: string[]): Map<
       const entry = skills.get(id);
       if (seen.has(id) || !entry?.available) continue;
       seen.add(id);
-      if (!chosen.has(id)) implied.set(id, [...(implied.get(id) ?? []), root]);
-      pending.push(...(entry.skillDependencies ?? []));
+      if (chosen.has(id)) continue;
+      const side = excluded.has(id) ? removed : included;
+      side.set(id, [...(side.get(id) ?? []), root]);
+      if (side === included) pending.push(...(entry.skillDependencies ?? []));
     }
   }
-  return implied;
+  return { included, removed };
+}
+
+/** A selection as it is stored: the two fields about referenced skills are
+ * left out when they say nothing. */
+export function storedSelection(selection: MemberResourceSelection): MemberResourceSelection {
+  const { referencedSkills: asked, excludedSkills: excluded, ...ticked } = selection;
+  return { ...ticked, ...(asked ? { referencedSkills: true, ...(excluded?.length ? { excludedSkills: [...new Set(excluded)] } : {}) } : {}) };
 }
