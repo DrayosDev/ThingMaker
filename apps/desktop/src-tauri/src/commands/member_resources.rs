@@ -16,22 +16,21 @@ pub struct CatalogView {
     problem: Option<String>,
 }
 
-/// Skills shipped inside ThingMaker, kept current in its own skills folder so
-/// every agent's selector offers them. They are the app's: a changed copy is
-/// replaced by the shipped one.
+/// Skills shipped inside ThingMaker, installed in its own skills folder so
+/// every agent's selector offers them.
 const BUNDLED_SKILLS: [(&str, &str); 1] = [("big-thing", super::odyssey::SKILL_MD)];
 
-fn ensure_bundled_skills(home: &Path) {
-    for (name, text) in BUNDLED_SKILLS {
-        let file = member_resources::thingmaker_skills_root(home).join(name).join("SKILL.md");
-        if std::fs::read_to_string(&file).is_ok_and(|existing| existing == text) { continue }
-        let _ = file.parent().map(std::fs::create_dir_all).transpose().and_then(|_| std::fs::write(&file, text));
+/// Once, when the application starts: listing resources never writes. A
+/// skill the person edited or removed there is left as they left it.
+pub fn install_bundled_skills(home: Option<&Path>) {
+    let Some(home) = home else { return };
+    if let Err(error) = member_resources::install_bundled_skills(&member_resources::thingmaker_skills_root(home), &BUNDLED_SKILLS) {
+        tracing::warn!(%error, "ThingMaker's own skills could not be installed");
     }
 }
 
 fn catalog_for(state: &AppState, root: Option<&Path>) -> CommandResult<ResourceCatalog> {
     let home = state.home.as_deref().ok_or_else(|| DesktopError::not_ready("HOME is not set"))?;
-    ensure_bundled_skills(home);
     let folder = state.try_account_folder(Provider::Claude, None)?.or_else(|| accounts::main_folder(Provider::Claude, home))
         .ok_or_else(|| DesktopError::not_ready("Claude account folder is unavailable"))?;
     let codex_folder = state.try_account_folder(Provider::Codex, None)?.or_else(|| accounts::main_folder(Provider::Codex, home))

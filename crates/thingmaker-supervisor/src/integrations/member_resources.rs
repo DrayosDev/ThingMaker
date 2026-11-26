@@ -9,10 +9,12 @@ use crate::{DesktopError, storage::content_hash};
 
 #[cfg(windows)]
 mod windows_stdio;
+mod bundled;
 mod imported;
 mod plugins;
 mod skill_dependencies;
 mod skill_links;
+pub use bundled::install as install_bundled_skills;
 pub use imported::{ImportStatus, PROVIDERS as IMPORT_PROVIDERS, root as imports_root, setup as setup_import};
 pub use skill_links::expand_skills;
 pub use skill_dependencies::McpDependency;
