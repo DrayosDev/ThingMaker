@@ -242,7 +242,12 @@ pub fn workspace_remove(workspace_id: String, state: State<'_, AppState>) -> Com
             live.len()
         )));
     }
-    state.with_storage(|s| s.workspace_delete(&workspace_id)).map_err(storage_error)
+    state.with_storage(|s| s.workspace_delete(&workspace_id)).map_err(storage_error)?;
+    // The continuity archives are desktop records of this workspace too.
+    if let Err(error) = super::continuity::forget_workspace(&state, std::path::Path::new(&record.canonical_root)) {
+        tracing::warn!(error = %error.message, "a forgotten workspace's continuity archives were not removed");
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]

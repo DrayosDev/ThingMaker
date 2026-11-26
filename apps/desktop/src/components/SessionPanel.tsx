@@ -2,9 +2,11 @@ import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRe
 import type { AttachmentSnapshot, ContentBlock, Mention, Provider, ToolPatch } from "@thingmaker/contracts";
 import { PROVIDER_LABELS } from "@thingmaker/contracts";
 import { t } from "../i18n";
-import { useStore, isWorkerIn, sessionTitle, type SessionTab } from "../store";
+import { useStore, isWorkerIn, sessionTitle, sessionContinuation, type SessionTab } from "../store";
 import { api } from "../ipc";
 import { ConfigPickers } from "./ConfigPickers";
+import { ContinuityNotice } from "./ContinuityNotice";
+import { QuotaRecovery } from "./QuotaRecovery";
 import { VoiceInput } from "./VoiceInput";
 import { PendingPrompt } from "./PendingPrompt";
 import { TeamChip } from "./TeamEditor";
@@ -182,7 +184,7 @@ function messageText(card: Extract<Card, { kind: "message" }>): string {
  */
 function EarlierConversation({ sessionId }: { sessionId: string }) {
   const session = useStore((s) => s.sessions[sessionId]);
-  const continuation = useStore((s) => (session?.snapshot.agentSessionId ? s.continuations[session.snapshot.agentSessionId] : undefined));
+  const continuation = useStore((s) => sessionContinuation(session, s.continuations));
   const earlier = useStore((s) => s.continuationHistory[sessionId]);
   const openSession = useStore((s) => s.openSession);
   const openUrl = useStore((s) => s.openUrl);
@@ -1280,6 +1282,8 @@ export function SessionPanel({ sessionId }: { sessionId: string }) {
         {tab !== "odyssey" && tab !== "ultrareview" && (
         <>
         <QueueStrip active={active} canSteer={canSteer} queue={projection.queue} sessionId={sessionId} />
+        {!isWorker && <QuotaRecovery sessionId={sessionId} />}
+        {!isWorker && <ContinuityNotice sessionId={sessionId} />}
         <NestedBanner sessionId={sessionId} />
         <NestedReportsStrip sessionId={sessionId} />
         <div className="composer-card">

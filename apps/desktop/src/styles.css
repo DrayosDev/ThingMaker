@@ -11234,3 +11234,19 @@ html[data-platform="android"] { --traffic-lights: 8px; --titlebar: 52px; height:
   align-items: center;
   justify-content: center;
 }
+
+.quota-recovery {
+  display: block;
+  flex: none;
+  margin: 8px 12px;
+}
+
+.quota-recovery p {
+  margin: 6px 0;
+}
+
+.quota-recovery-options {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}

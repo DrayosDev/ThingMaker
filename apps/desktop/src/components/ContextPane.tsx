@@ -12,7 +12,8 @@ import type { ContextBundle, ContextSources, Mention, TranscriptUsage } from "@t
 import { PROVIDER_LABELS } from "@thingmaker/contracts";
 import { t } from "../i18n";
 import { api } from "../ipc";
-import { useStore, windowDelta as windowDeltaOf } from "../store";
+import { useStore, usageFromQuota, windowDelta as windowDeltaOf } from "../store";
+import { sessionUsesActiveAccount } from "../quotaRecovery";
 import { cacheEfficiency, percent } from "../usage";
 import { UsageLine, signed, windowName } from "./UsageLine";
 
@@ -50,8 +51,12 @@ export function ContextPane({ sessionId }: { sessionId: string }) {
   const mentions = useStore((s) => s.mentions[sessionId] ?? EMPTY_LIST);
   const draft = useStore((s) => s.drafts[sessionId] ?? "");
   const provider = session?.snapshot.provider ?? "claude";
-  const account = useStore((s) => s.usage[provider] ?? null);
-  const quota = useStore((s) => s.quotas[provider]);
+  const globalAccount = useStore((s) => s.usage[provider] ?? null);
+  const globalQuota = useStore((s) => s.quotas[provider]);
+  const accounts = useStore((s) => s.accounts);
+  const matchesActive = !session || sessionUsesActiveAccount(session.snapshot, accounts);
+  const quota = session?.projection.quota ?? (matchesActive ? globalQuota : undefined);
+  const account = session?.projection.quota ? usageFromQuota(session.projection.quota) : matchesActive ? globalAccount : null;
   const [sources, setSources] = useState<ContextSources | null>(null);
   const [name, setName] = useState("");
   const [usage, setUsage] = useState<TranscriptUsage | null>(null);

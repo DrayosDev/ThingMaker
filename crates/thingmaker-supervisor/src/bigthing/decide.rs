@@ -210,7 +210,7 @@ pub fn failover_decision(goal: &OdysseyRecord, journal_entries: &[JournalEntry],
     let other = candidates
         .iter()
         .copied()
-        .filter(|provider| provider.can_orchestrate() && *provider != Provider::Local)
+        .filter(|provider| provider.can_lead_goal() && *provider != Provider::Local)
         .find(|provider| *provider != current && !usage_verdict(usage.get(provider)).is_exhausted())?;
     Some(Failover { to: other, reason: format!("{}'s account is spent ({reason}) and {}'s is not", current.label(), other.label()) })
 }

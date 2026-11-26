@@ -163,9 +163,10 @@ export function TeamChip({ sessionId, disabled }: { sessionId: string; disabled:
 
   const apply = async (preset: TeamPreset) => {
     setOpen(false);
-    await saveTeam(sessionId, tidyCombo(preset.combo));
+    const combo = tidyCombo(preset.combo);
+    await saveTeam(sessionId, combo);
     const lead = preset.orchestrator;
-    if (switchesSession(session, lead)) {
+    if (switchesSession(session, lead, combo)) {
       setPendingProvider(sessionId, { provider: lead.provider, ...(lead.resources ? { resources: lead.resources } : {}), ...(lead.model ? { model: lead.model } : {}), ...(lead.effort ? { effort: lead.effort } : {}) });
       return;
     }

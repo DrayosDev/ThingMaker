@@ -117,14 +117,32 @@ describe("the team chart", () => {
     expect("agentChat" in combo).toBe(false);
   });
 
-  it("changes who leads from the same picker, without Gemini", () => {
+  it("changes who leads from the same picker and keeps signed-out Gemini unavailable", () => {
     draw();
     fireEvent.click(screen.getByRole("button", { name: /Leads/ }));
     fireEvent.click(screen.getByRole("button", { name: /Opus 5.5 · Claude Code/ }));
     const picker = screen.getByRole("region", { name: "Who leads this team" });
-    expect(within(picker).queryByText("Gemini")).toBeNull();
+    const gemini = within(picker).getByRole("button", { name: /Gemini 3.1 Pro/ });
+    expect(gemini.getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(gemini);
+    expect(onChange).not.toHaveBeenCalled();
     fireEvent.click(within(picker).getByRole("button", { name: /GPT-6.1 Sol/ }));
     expect(orchestrator).toEqual({ provider: "codex", model: "gpt-6.1-sol", effort: "xhigh" });
+  });
+
+  it("lets signed-in Gemini lead while preserving the chosen helpers", () => {
+    useStore.setState({ providers: providers.map((entry) => entry.provider === "gemini" ? { ...entry, auth: { loggedIn: true } } : entry) } as never);
+    const helpers = combo;
+    draw();
+    fireEvent.click(screen.getByRole("button", { name: /Leads/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Opus 5.5 · Claude Code/ }));
+    const picker = screen.getByRole("region", { name: "Who leads this team" });
+    const gemini = within(picker).getByRole("button", { name: /Gemini 3.1 Pro/ });
+    expect(gemini.getAttribute("aria-disabled")).toBe("false");
+    fireEvent.click(gemini);
+    expect(orchestrator).toMatchObject({ provider: "gemini", model: "gemini-3.1-pro" });
+    expect(orchestrator.effort).not.toBe("xhigh");
+    expect(combo).toEqual(helpers);
   });
 
   it("keeps a helper's own instructions, sent with every task it gets", () => {

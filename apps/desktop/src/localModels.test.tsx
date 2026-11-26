@@ -13,6 +13,7 @@ vi.mock("./ipc", () => ({
 }));
 import { api } from "./ipc";
 import { switchesSession, useStore } from "./store";
+import { emptyProjection } from "./projection";
 import { freeNotPrivate, isLocalChat } from "./localModels";
 import { suggestModel } from "./teamRoles";
 import { LocalModelsCard } from "./components/LocalModelsCard";
@@ -238,14 +239,21 @@ describe("suggested helpers", () => {
 
 describe("starting a local session", () => {
   it("opens on the model the chip shows when none was picked", async () => {
+    const projection = emptyProjection();
+    projection.attachment = "attached";
+    projection.process = "ready";
     useStore.setState({
-      sessions: { s1: { workspaceId: "w1", handle: { id: "s1" }, snapshot: { provider: "claude" }, projection: { cards: [] }, inFlightRequestId: null } },
+      sessions: { s1: { workspaceId: "w1", handle: { id: "s1", attachmentGeneration: "1" }, snapshot: { provider: "claude", agentSessionId: "agent-old", accountId: "default", foreground: "idle", autonomousTurns: [], detachedCalls: {} }, projection, inFlightRequestId: null } },
       pendingProvider: { s1: { provider: "local" } },
       drafts: { s1: "Hi" },
       attachments: {},
       mentions: {},
       teams: {},
+      sideBrief: {}, continuations: {},
     } as never);
+    vi.mocked(api.sessionSnapshot).mockResolvedValue(useStore.getState().sessions.s1!.snapshot);
+    vi.mocked(api.delegationJobs).mockResolvedValue([]);
+    vi.mocked(api.odysseyForSession).mockResolvedValue(null);
     vi.mocked(api.sessionOpen).mockRejectedValue(new Error("stop here"));
     await useStore.getState().continueOnProvider("s1");
     expect(api.sessionOpen).toHaveBeenCalledWith(expect.objectContaining({ provider: "local", model: "@chat/llama3.1:8b" }));

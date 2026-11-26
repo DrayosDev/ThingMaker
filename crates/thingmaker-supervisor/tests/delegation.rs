@@ -54,7 +54,7 @@ struct MockLauncher {
 }
 
 impl WorkerLauncher for MockLauncher {
-    fn revision(&self, root: &std::path::Path, slot: &WorkerSlot) -> Result<Option<String>, DesktopError> {
+    fn revision(&self, _orchestrator: &str, root: &std::path::Path, slot: &WorkerSlot) -> Result<Option<String>, DesktopError> {
         if let Some(delegation) = self.probe.get().cloned() {
             let (done, finished) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
@@ -822,6 +822,68 @@ async fn a_message_its_recipient_cannot_take_is_given_up_and_the_sender_is_told(
     assert_eq!(delivered.id, 2);
     assert!(delivered.delivered, "{:?}", delivered.error);
     assert!(service.chat_undelivered(&lead).is_empty());
+    service.release("lead").await;
+}
+
+/// Everything the person's side of a worker's transcript holds so far.
+async fn prompts_of(worker: &SessionActor) -> String {
+    use thingmaker_supervisor::{acp::updates::{ContentBlock, SessionUpdate}, supervisor::SessionEvent};
+    let mut text = String::new();
+    for event in worker.history(0, 500).await.unwrap() {
+        if let SessionEvent::Update(SessionUpdate::UserMessage(message)) = &event.payload {
+            text.extend(message.content.iter().filter_map(|block| if let ContentBlock::Text { text } = block { Some(text.as_str()) } else { None }));
+        }
+    }
+    text
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_gemini_member_has_one_way_into_the_chat_and_the_teams_setting_decides_for_it_too() {
+    use thingmaker_supervisor::delegation::mcp;
+    let Some((service, launcher, _)) = service(&[]) else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let mut combo = team();
+    combo.workers.push(WorkerSlot { name: "flash".into(), provider: Provider::Gemini, model: None, effort: None, capabilities: vec!["code".into()], note: None, prompt: None, resources: None });
+    // Gemini leads this team, which it does on native ACP with the team
+    // server: it has the tools, like any other leader.
+    let token = service.register("lead", Provider::Gemini, dir.path().into(), combo.clone());
+    let lead = service.caller_for_token(&token).unwrap();
+    assert!(tool_names(&service, &lead).await.contains(&"chat_send".to_string()));
+    let job = service.delegate("lead", DelegateArgs { task: "Tidy the notes".into(), worker: Some("flash".into()), ..Default::default() }).unwrap();
+    service.await_jobs("lead", std::slice::from_ref(&job.id), Duration::from_secs(30), false).await.unwrap();
+    let spec = launcher.launched.lock().unwrap()[0].clone();
+    assert!(!spec.slot.provider.worker_team_server() && Provider::Claude.worker_team_server());
+
+    // The Gemini worker is on the stream-json bridge: it was told how to
+    // write a message in its reply, and is not offered the tools as well,
+    // even by a host that handed it the team server anyway.
+    let worker = service.caller_for_token(spec.mcp_token.as_deref().unwrap()).unwrap();
+    assert!(service.chat_open_to(&worker));
+    let first = launcher.actors.lock().unwrap()[0].clone();
+    assert!(prompts_of(&first).await.contains("finish with a line TEAM_CHAT"));
+    assert!(!tool_names(&service, &worker).await.iter().any(|name| name.starts_with("chat_")), "one way in, not two");
+    for tool in ["chat_send", "chat_members"] {
+        let called = mcp::handle(&service, &worker, &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": tool, "arguments": {"to": "orchestrator", "text": "Hello"}}})).await.unwrap();
+        assert_eq!(called["result"]["isError"], true, "{called}");
+    }
+    assert!(service.chat_history("lead").is_empty(), "nothing was sent through the tool");
+    let started = mcp::handle(&service, &worker, &json!({"jsonrpc": "2.0", "id": 3, "method": "initialize", "params": {}})).await.unwrap();
+    assert!(!started["result"]["instructions"].as_str().unwrap().contains("chat_send"));
+
+    // With agent chat off for the team neither path is open: the leader
+    // loses the tools, and the next task says nothing about TEAM_CHAT.
+    service.set_combo("lead", Combo { agent_chat: AgentChat::Off, ..combo }).unwrap();
+    assert!(!service.chat_open_to(&lead) && !service.chat_open_to(&worker));
+    assert!(!tool_names(&service, &lead).await.iter().any(|name| name.starts_with("chat_")));
+    assert!(service.send_chat(&lead, &job.id, "Which file?", None).unwrap_err().contains("Agent chat is off"));
+    assert!(service.send_chat(&worker, "orchestrator", "Hello", None).unwrap_err().contains("Agent chat is off"));
+    let before = launcher.actors.lock().unwrap().len();
+    let next = service.delegate("lead", DelegateArgs { task: "Check the dates".into(), worker: Some("flash".into()), ..Default::default() }).unwrap();
+    service.await_jobs("lead", std::slice::from_ref(&next.id), Duration::from_secs(30), false).await.unwrap();
+    let actors = launcher.actors.lock().unwrap().clone();
+    let told = prompts_of(actors.last().unwrap()).await;
+    let fresh = if actors.len() > before { told.as_str() } else { told.rsplit("Check the dates").next().unwrap_or_default() };
+    assert!(!fresh.contains("TEAM_CHAT"), "{fresh}");
     service.release("lead").await;
 }
 

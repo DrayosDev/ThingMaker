@@ -94,7 +94,7 @@ function seed(odyssey: OdysseyView | null = null) {
   const projection = emptyProjection();
   projection.attachment = "attached";
   projection.process = "ready";
-  const snapshot = { handle, agentSessionId: "kw-1" } as unknown as Snapshot;
+  const snapshot = { handle, agentSessionId: "kw-1", provider: "codex" } as unknown as Snapshot;
   const session: LiveSession = {
     handle,
     workspaceId: "w1",

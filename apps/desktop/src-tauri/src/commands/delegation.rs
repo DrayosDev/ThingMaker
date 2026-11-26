@@ -81,8 +81,21 @@ pub const RETRY_KEY: &str = "delegationRetry";
 /// to outlast `await_jobs`.
 const CLAUDE_MCP_TOOL_TIMEOUT_MS: &str = "1800000";
 
+pub use thingmaker_supervisor::storage::workspaces::GEMINI_NATIVE as GEMINI_NATIVE_KEY;
+
 pub fn session_scope(row_id: &str) -> String {
     format!("session:{row_id}")
+}
+
+/// Whether a Gemini session about to open runs on native `agy acp`, the only
+/// mode that takes the session's own `team` server. A new one does when it
+/// starts with a team to lead; a reopened one does when it began that way.
+/// Every other Gemini session is the plain stream-json session it always was.
+pub fn gemini_native(state: &AppState, resumed_row: Option<&str>, combo: &Combo) -> bool {
+    match resumed_row {
+        Some(row) => state.with_storage(|s| s.setting_get::<bool>(GEMINI_NATIVE_KEY, row)).ok().flatten().unwrap_or(false),
+        None => !combo.workers.is_empty(),
+    }
 }
 
 /// Starts the service and its socket; called once from `setup`.
@@ -97,6 +110,7 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
             engine.note_job(job);
         }
     });
+    delegation.add_extension(Arc::new(super::continuity::ContinuityTools { app: app.clone() }));
     let chat = app.clone();
     delegation.on_chat(move |event| match event {
         ChatEvent::Changed { session } => {
@@ -141,18 +155,29 @@ pub fn starting_combo(state: &AppState, requested: Option<Combo>, row_id: Option
 
 /// Makes the attachment about to open an orchestrator: registers it, hands
 /// it the ThingMaker MCP server, and tells it about its team. Without the
-/// service (it failed to start) the session opens as a plain one.
-pub fn prepare_orchestrator(state: &AppState, key: &str, root: PathBuf, combo: &Combo, launch: &mut AgentLaunch, config: &mut SessionActorConfig) {
+/// service (it failed to start) the session opens as a plain one. Says
+/// whether the session leads a team.
+///
+/// `gemini_native` is [`gemini_native`]'s answer; other providers ignore it.
+pub fn prepare_orchestrator(state: &AppState, key: &str, root: PathBuf, combo: &Combo, launch: &mut AgentLaunch, config: &mut SessionActorConfig, gemini_native: bool) -> bool {
     // A provider that cannot take the session's own MCP server cannot lead
     // a team: it opens as a plain session.
     if !launch.provider().can_orchestrate() {
-        return;
+        return false;
+    }
+    if let AgentLaunch::Gemini(options) = launch {
+        if !gemini_native {
+            return false;
+        }
+        // The transport is the conversation's, with or without the service.
+        options.native_acp = true;
     }
     let (Some(delegation), Some(socket), Some(program)) = (state.delegation.get(), state.delegation_socket.get(), relay_program()) else {
-        return;
+        return false;
     };
     let token = delegation.register(key, launch.provider(), root, combo.clone());
     config.mcp_servers = vec![server_entry(&program, &[RELAY_ARG.to_string()], socket.path(), &token)];
+    config.leads_team = true;
     let withheld = combo.withholds_native_subagents();
     let guidance = orchestrator_guidance(withheld);
     match launch {
@@ -169,8 +194,18 @@ pub fn prepare_orchestrator(state: &AppState, key: &str, root: PathBuf, combo: &
             }
             options.developer_instructions = Some(guidance);
         }
-        AgentLaunch::Gemini(_) => {}
+        AgentLaunch::Gemini(options) => {
+            // Native ACP's system-prompt extension has no established payload
+            // contract here. Use an ordinary prompt block instead of guessing.
+            // Do not claim native subagent tools have been disabled.
+            let mut prompt = orchestrator_guidance(false);
+            if withheld {
+                prompt.push_str(" For delegated work, use only the selected team workers through the team tools; do not start native subagents.");
+            }
+            options.initial_prompt_prefix = Some(prompt);
+        }
     }
+    true
 }
 
 /// After the orchestrator is open: its quota reports feed the router.
@@ -204,12 +239,18 @@ pub async fn release(state: &AppState, key: &str) {
     }
 }
 
+/// The account a worker of `orchestrator` runs on: the leader's own when the
+/// person pinned the leader to one and the worker is on the same provider,
+/// since that is the account they chose to spend; the provider's active
+/// account otherwise.
+fn worker_account(state: &AppState, orchestrator: &str, provider: Provider) -> String {
+    state.pinned_account(orchestrator).filter(|(pinned, _)| *pinned == provider).map(|(_, account)| account).unwrap_or_else(|| state.active_account(provider))
+}
+
 /// What a worker opened with: its account, its workspace and its resolved
 /// resources. A worker whose revision changed is not reused.
-fn revision_of(state: &AppState, root: &std::path::Path, slot: &thingmaker_supervisor::delegation::WorkerSlot, resolved: Option<&thingmaker_supervisor::integrations::member_resources::ResolvedResources>) -> String {
-    serde_json::to_string(&serde_json::json!([
-        state.active_account(slot.provider), root, resolved.map(|value| &value.revision)
-    ])).unwrap_or_default()
+fn revision_of(account: &str, root: &std::path::Path, resolved: Option<&thingmaker_supervisor::integrations::member_resources::ResolvedResources>) -> String {
+    serde_json::to_string(&serde_json::json!([account, root, resolved.map(|value| &value.revision)])).unwrap_or_default()
 }
 
 struct HostLauncher {
@@ -217,10 +258,10 @@ struct HostLauncher {
 }
 
 impl WorkerLauncher for HostLauncher {
-    fn revision(&self, root: &std::path::Path, slot: &thingmaker_supervisor::delegation::WorkerSlot) -> CommandResult<Option<String>> {
+    fn revision(&self, orchestrator: &str, root: &std::path::Path, slot: &thingmaker_supervisor::delegation::WorkerSlot) -> CommandResult<Option<String>> {
         let state = self.app.state::<AppState>();
         let resolved = super::member_resources::resolve(&state, root, slot)?;
-        Ok(Some(revision_of(&state, root, slot, resolved.as_ref())))
+        Ok(Some(revision_of(&worker_account(&state, orchestrator, slot.provider), root, resolved.as_ref())))
     }
     fn launch(&self, spec: WorkerSpec) -> BoxFuture<Result<SessionActor, DesktopError>> {
         let launched = self.launch_with_revision(spec);
@@ -237,10 +278,11 @@ impl WorkerLauncher for HostLauncher {
                 .ok_or_else(|| DesktopError::not_ready("the orchestrator's workspace is gone"))?;
             let record = super::workspace::ensure_trusted(&state, record)?;
             let reserved = SessionId::reserve();
-            let (target, mut launch) = super::session::build_launch(&state, &record, spec.slot.provider, spec.slot.model.clone(), spec.slot.effort.clone(), spec.resume.clone(), reserved.clone())?;
+            let account = worker_account(&state, &spec.orchestrator, spec.slot.provider);
+            let (target, mut launch) = super::session::build_launch_for_account(&state, &record, spec.slot.provider, spec.slot.model.clone(), spec.slot.effort.clone(), spec.resume.clone(), reserved.clone(), &account)?;
             // Resolved once: the revision recorded is the one this launch used.
             let resolved = super::member_resources::resolve(&state, &spec.root, &spec.slot)?;
-            let revision = revision_of(&state, &spec.root, &spec.slot, resolved.as_ref());
+            let revision = revision_of(&account, &spec.root, resolved.as_ref());
             if spec.resume.is_some() && spec.resume_revision.as_ref() != Some(&revision) {
                 return Err(DesktopError::not_ready("The worker account or resources changed before its conversation could reopen."));
             }
@@ -251,14 +293,17 @@ impl WorkerLauncher for HostLauncher {
             };
             let program = super::session::program_of(&target, &launch);
             let mut config = SessionActorConfig::new(target, launch);
+            config.account_id = Some(account.clone());
             config.builtin_web = builtin_web;
             config.resource_files = resource_files;
             config.environment = super::session::launch_environment(&state).with_program_dir(&program);
             config.before_prompt = Some(super::review::turn_snapshots(&state, &record.id, &record.canonical_root));
             // The worker's own reduced team server: the project memory and the
-            // run's board (ADR-010). A provider that cannot load one goes without.
+            // run's board (ADR-010). A provider that cannot load one as a
+            // worker goes without: Gemini, which stays on its stream-json
+            // bridge here.
             if let (Some(token), Some(socket), Some(program)) = (spec.mcp_token.as_deref(), state.delegation_socket.get(), relay_program())
-                && spec.slot.provider.can_orchestrate()
+                && spec.slot.provider.worker_team_server()
             {
                 config.mcp_servers = vec![server_entry(&program, &[RELAY_ARG.to_string()], socket.path(), token)];
                 if spec.slot.provider == Provider::Claude {
@@ -276,6 +321,11 @@ impl WorkerLauncher for HostLauncher {
                 .map_err(storage_error)?;
             if spec.resume.is_some() {
                 state.with_storage(|s| s.session_set_archive(&row.id, thingmaker_supervisor::storage::workspaces::ArchiveState::Active)).map_err(storage_error)?;
+            }
+            // Opened on its leader's pinned account: the worker's own
+            // conversation is reopened on it too.
+            if state.pinned_account(&spec.orchestrator).is_some_and(|(provider, _)| provider == spec.slot.provider) {
+                state.with_storage(|s| s.setting_set(thingmaker_supervisor::storage::workspaces::SESSION_ACCOUNT, &row.id, &account)).map_err(storage_error)?;
             }
             if spec.slot.provider == Provider::Local && let Some(model) = &spec.slot.model {
                 let setup = super::session::LocalSessionSetup { model: model.clone(), resources: spec.slot.resources.clone() };
@@ -489,5 +539,77 @@ mod chat_receipt_tests {
         assert_eq!(kept.len(), CHAT_RECEIPTS_KEPT);
         assert_eq!(kept[0].token, "t1");
         assert_eq!(kept.last().unwrap().token, "newest");
+    }
+}
+
+#[cfg(test)]
+mod leader_tests {
+    use super::*;
+    use thingmaker_supervisor::{
+        acp::LaunchTarget,
+        agents::{accounts, gemini::GeminiLaunchOptions},
+        delegation::WorkerSlot,
+    };
+
+    fn helper() -> Combo {
+        Combo { workers: vec![WorkerSlot { name: "helper".into(), provider: Provider::Codex, model: None, effort: None, capabilities: Vec::new(), note: None, prompt: None, resources: None }], ..Default::default() }
+    }
+
+    #[test]
+    fn gemini_runs_natively_only_when_it_starts_with_a_team_and_a_conversation_keeps_its_transport() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::initialize(dir.path(), None).unwrap();
+        let workspace = state.with_storage(|s| s.workspace_upsert("/project", "/project", "project")).unwrap();
+        let row = |id: &str| state.with_storage(|s| s.session_upsert(&workspace.id, id, SessionOrigin::Desktop, Provider::Gemini)).unwrap().id;
+        // A new session: only with a team to lead.
+        assert!(gemini_native(&state, None, &helper()));
+        assert!(!gemini_native(&state, None, &Combo::default()));
+        // A conversation from before, or one started without a team, stays on
+        // the stream-json bridge even once it has been given a team.
+        let old = row("stream-json");
+        assert!(!gemini_native(&state, Some(&old), &helper()));
+        // One that began natively is reopened natively, with or without one.
+        let native = row("native");
+        state.with_storage(|s| s.setting_set(GEMINI_NATIVE_KEY, &native, &true)).unwrap();
+        assert!(gemini_native(&state, Some(&native), &Combo::default()));
+    }
+
+    #[test]
+    fn a_plain_gemini_session_is_left_exactly_as_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::initialize(dir.path(), None).unwrap();
+        let options = GeminiLaunchOptions::new(dir.path(), "agy");
+        let before = options.arguments();
+        let mut launch = AgentLaunch::Gemini(options);
+        let mut config = SessionActorConfig::new(LaunchTarget::executable("agy"), launch.clone());
+        assert!(!prepare_orchestrator(&state, "plain", dir.path().into(), &helper(), &mut launch, &mut config, false));
+        let AgentLaunch::Gemini(options) = &launch else { panic!("wrong provider") };
+        assert!(!options.native_acp && options.initial_prompt_prefix.is_none());
+        assert_eq!(options.arguments(), before, "still the stream-json command line");
+        assert!(config.mcp_servers.is_empty() && !config.leads_team);
+        // The transport is the conversation's even when the team service is
+        // down: a native one is not reopened on the bridge.
+        assert!(!prepare_orchestrator(&state, "native", dir.path().into(), &helper(), &mut launch, &mut config, true));
+        let AgentLaunch::Gemini(options) = &launch else { panic!("wrong provider") };
+        assert!(options.native_acp);
+        assert_eq!(options.arguments()[0], "acp");
+    }
+
+    #[test]
+    fn a_worker_runs_on_its_leaders_pinned_account_only_on_the_leaders_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::initialize(dir.path(), None).unwrap();
+        let list = [("work", Provider::Claude), ("side", Provider::Codex)].map(|(id, provider)| accounts::Account { id: id.into(), provider, label: id.into() });
+        state.with_storage(|s| s.setting_set(accounts::ACCOUNTS_SETTING, GLOBAL_SCOPE, &list)).unwrap();
+        state.with_storage(|s| s.setting_set(accounts::ACTIVE_ACCOUNT_SETTING, "codex", &"side")).unwrap();
+        // A leader that follows the active account: so do its workers.
+        assert_eq!(worker_account(&state, "lead", Provider::Claude), "default");
+        // Pinned to another Claude account, after the first one ran out.
+        state.set_pinned_account("lead", Provider::Claude, "work");
+        assert_eq!(worker_account(&state, "lead", Provider::Claude), "work");
+        assert_eq!(worker_account(&state, "lead", Provider::Codex), "side", "another provider's worker keeps that provider's active account");
+        assert_eq!(worker_account(&state, "someone-else", Provider::Claude), "default");
+        // The revision a worker is reused by names the account it ran on.
+        assert_ne!(revision_of("work", dir.path(), None), revision_of("default", dir.path(), None));
     }
 }

@@ -1,16 +1,16 @@
 //! Gemini, through Antigravity's official CLI, `agy`.
 //!
-//! `agy` speaks newline-delimited JSON events rather than ACP or JSON-RPC, so
-//! the session actor reaches it through [`bridge::GeminiBridge`]. What is
+//! In stream-json mode the session actor reaches `agy` through
+//! [`bridge::GeminiBridge`]; native ACP uses the shared stdio transport. What is
 //! Antigravity's own lives here: the launch contract (`launch`), the bridge,
 //! and one-shot account questions (`probe`: sign-in and models).
 //!
-//! A Gemini session is a worker or a plain session, never an orchestrator:
-//! `agy` takes MCP servers only from its global configuration, so it cannot
-//! be handed a session's own `team` server.
+//! Sessions with session-local MCP servers use native `agy acp`; other
+//! sessions retain the stream-json bridge. Team tokens travel only through
+//! ACP session/new or session/load, never through shared configuration.
 //!
-//! Pinned against `agy` 1.2.14 (1 October 2026); see the S3 results in
-//! docs/research/multi-provider-viability.md §7.
+//! The stream-json fixture was captured from `agy` 1.2.14. Native ACP
+//! leadership is described in docs/plans/gemini-team-leadership.md.
 
 pub mod bridge;
 pub mod launch;

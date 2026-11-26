@@ -7,6 +7,17 @@ use super::{Storage, StorageError, new_id, now_unix_ms};
 use crate::{agents::Provider, integrations::member_resources::ResourceSelection};
 
 const RESOURCE_SELECTION: &str = "sessionResourceSelection";
+/// Settings key, scoped to a session's row: the account the session was
+/// pinned to, when the person chose one for it rather than the provider's
+/// active account. A reopened session, and its workers, run on it.
+pub const SESSION_ACCOUNT: &str = "sessionAccount";
+/// Settings key, scoped to a session's row: this Gemini conversation was
+/// started on native `agy acp`, and is reopened on it. One without the mark
+/// began on the stream-json bridge and stays there, so a conversation never
+/// changes transport between two openings.
+pub const GEMINI_NATIVE: &str = "geminiNativeAcp";
+/// What a session's row owns in the settings table, deleted with it.
+const SESSION_SETTINGS: &str = "'sessionResourceSelection', 'localSessionSetup', 'sessionAccount', 'geminiNativeAcp'";
 
 pub const LOCAL_ENVIRONMENT_ID: &str = "local";
 
@@ -256,7 +267,7 @@ impl Storage {
             conn.execute("DELETE FROM artifacts WHERE workspace_id = ?1", params![id])?;
             conn.execute("DELETE FROM worktrees WHERE workspace_id = ?1", params![id])?;
             conn.execute("DELETE FROM ultra_reviews WHERE workspace_id = ?1", params![id])?;
-            conn.execute("DELETE FROM settings WHERE key IN (?1, 'localSessionSetup') AND scope IN (SELECT id FROM sessions WHERE workspace_id = ?2)", params![RESOURCE_SELECTION, id])?;
+            conn.execute(&format!("DELETE FROM settings WHERE key IN ({SESSION_SETTINGS}) AND scope IN (SELECT id FROM sessions WHERE workspace_id = ?1)"), params![id])?;
             conn.execute("DELETE FROM sessions WHERE workspace_id = ?1", params![id])?;
             let removed = conn.execute("DELETE FROM workspaces WHERE id = ?1", params![id])?;
             if removed == 0 {
@@ -502,7 +513,7 @@ impl Storage {
             transaction.execute("DELETE FROM projection_generations WHERE session_id = ?1", params![id])?;
             transaction.execute("DELETE FROM review_baselines WHERE session_id = ?1", params![id])?;
             transaction.execute("DELETE FROM artifacts WHERE workspace_id = ?1 AND agent_session_id = ?2", params![workspace_id, agent_id])?;
-            transaction.execute("DELETE FROM settings WHERE key IN (?1, 'localSessionSetup') AND scope = ?2", params![RESOURCE_SELECTION, id])?;
+            transaction.execute(&format!("DELETE FROM settings WHERE key IN ({SESSION_SETTINGS}) AND scope = ?1"), params![id])?;
             transaction.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
         }
         transaction.commit()?;
@@ -579,11 +590,20 @@ mod tests {
         let kept = storage.session_upsert(&workspace.id, "agent-kept", SessionOrigin::Desktop, Provider::Codex).unwrap();
         storage.outbox_insert("r1", &gone.id, "h", "outbox/r1.json", crate::ids::DecimalId(1)).unwrap();
         storage.outbox_insert("r2", &kept.id, "h", "outbox/r2.json", crate::ids::DecimalId(1)).unwrap();
+        for row in [&gone, &kept] {
+            storage.setting_set(SESSION_ACCOUNT, &row.id, &"work").unwrap();
+            storage.setting_set(GEMINI_NATIVE, &row.id, &true).unwrap();
+        }
 
         let payloads = storage.sessions_delete(&workspace.id, std::slice::from_ref(&gone.id)).unwrap();
 
         assert_eq!(payloads, vec!["outbox/r1.json".to_string()]);
         assert!(storage.session_get(&gone.id).unwrap().is_none());
+        // What the row owned in the settings goes with it, and only that.
+        assert!(storage.setting_get::<String>(SESSION_ACCOUNT, &gone.id).unwrap().is_none());
+        assert!(storage.setting_get::<bool>(GEMINI_NATIVE, &gone.id).unwrap().is_none());
+        assert_eq!(storage.setting_get::<String>(SESSION_ACCOUNT, &kept.id).unwrap().as_deref(), Some("work"));
+        assert_eq!(storage.setting_get::<bool>(GEMINI_NATIVE, &kept.id).unwrap(), Some(true));
         assert!(storage.outbox_get("r1").unwrap().is_none());
         assert!(storage.session_get(&kept.id).unwrap().is_some());
         assert!(storage.outbox_get("r2").unwrap().is_some());

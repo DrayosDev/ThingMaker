@@ -819,6 +819,13 @@ pub struct CreateRequest {
 
 #[tauri::command]
 pub fn odyssey_create(request: CreateRequest, state: State<'_, AppState>) -> CommandResult<OdysseyView> {
+    use thingmaker_supervisor::bigthing::engine::validate_goal_leadership;
+    validate_goal_leadership(request.provider, request.team.as_ref())?;
+    if let Some(agent) = request.agent_session_id.as_deref()
+        && let Some(record) = state.with_storage(|storage| storage.session_by_agent_id(&request.workspace_id, agent)).map_err(storage_error)?
+    {
+        validate_goal_leadership(Some(record.provider), request.team.as_ref())?;
+    }
     // The goal is created for a live session, so its desktop row is upserted
     // rather than required: the catalog may not have reconciled it yet.
     let session_id = match &request.agent_session_id {
@@ -864,6 +871,9 @@ pub struct EditGoalRequest {
 
 #[tauri::command]
 pub fn odyssey_edit_goal(request: EditGoalRequest, state: State<'_, AppState>) -> CommandResult<OdysseyRecord> {
+    if let Some(team) = request.edit.team.as_ref() {
+        thingmaker_supervisor::bigthing::engine::validate_goal_leadership(None, team.as_ref())?;
+    }
     state.with_storage(|storage| storage.odyssey_edit_goal(&request.id, &request.edit)).map_err(storage_error)
 }
 

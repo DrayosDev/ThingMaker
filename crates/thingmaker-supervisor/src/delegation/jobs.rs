@@ -191,7 +191,9 @@ pub trait TeamExtension: Send + Sync {
 pub trait WorkerLauncher: Send + Sync {
     /// Identity of account/configuration and resolved resources. A changed
     /// revision must never reuse a conversation with the old tool context.
-    fn revision(&self, _root: &std::path::Path, slot: &WorkerSlot) -> Result<Option<String>, DesktopError> {
+    /// `orchestrator` is the leader's attachment handle: the account a
+    /// worker runs on can follow its leader's.
+    fn revision(&self, _orchestrator: &str, _root: &std::path::Path, slot: &WorkerSlot) -> Result<Option<String>, DesktopError> {
         Ok(slot.resources.as_ref().map(|value| serde_json::to_string(value).unwrap_or_default()))
     }
     /// Opens a worker for `spec`. The actor is registered with the host like
@@ -201,7 +203,7 @@ pub trait WorkerLauncher: Send + Sync {
     /// resolves the member's resources to launch it overrides this, so they
     /// are resolved once rather than once for the revision and again to launch.
     fn launch_with_revision(&self, spec: WorkerSpec) -> BoxFuture<Result<(SessionActor, Option<String>), DesktopError>> {
-        let revision = self.revision(&spec.root, &spec.slot);
+        let revision = self.revision(&spec.orchestrator, &spec.root, &spec.slot);
         let launch = self.launch(spec);
         Box::pin(async move {
             let revision = revision?;
@@ -602,7 +604,7 @@ impl Delegation {
         let Some((root, team)) = team else { return Revisions::default() };
         // A follow-up stays with its own worker; a new job may go to anyone.
         let members = team.workers.into_iter().filter(|slot| follow_up.as_ref().is_none_or(|name| *name == slot.name)).map(|slot| {
-            let revision = self.inner.launcher.revision(&root, &slot).map_err(|error| error.message);
+            let revision = self.inner.launcher.revision(session, &root, &slot).map_err(|error| error.message);
             (slot, revision)
         });
         Revisions { members: members.collect(), root }
@@ -775,7 +777,9 @@ impl Delegation {
             prompt = task.to_string();
         }
         let caller = Caller::Worker { orchestrator: session.into(), root: root.clone(), name: slot.name.clone(), provider: slot.provider, job_id: view.id.clone() };
-        if slot.provider == Provider::Gemini && self.chat_open_to(&caller) {
+        // A worker without the team server has no chat tools: it is told
+        // how to write a message in its reply instead.
+        if !slot.provider.worker_team_server() && self.chat_open_to(&caller) {
             let members = serde_json::Value::Array(self.chat_members(&caller));
             prompt.push_str(&format!("\nTeam chat addresses: {members}. To send or reply, finish with a line TEAM_CHAT followed by a JSON object with string fields to and text, and optional numeric reply_to."));
             // It has no tool call to hear this through.
@@ -911,7 +915,7 @@ impl Delegation {
             let outcome = self.turn(&job_id, &worker, &next_prompt).await;
             match outcome {
                 TurnOutcome::Done { text, limited: None } => {
-                    if spec.slot.provider == Provider::Gemini {
+                    if !spec.slot.provider.worker_team_server() {
                         self.gemini_messages(&spec, &text);
                     }
                     self.finish(&job_id, JobStatus::Succeeded, Some(text), None);

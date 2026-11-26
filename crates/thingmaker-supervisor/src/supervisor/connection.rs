@@ -31,6 +31,17 @@ impl Connection {
             AgentLaunch::Codex(options) => CodexBridge::spawn(spec, generation, options.clone())
                 .await
                 .map(|(bridge, incoming)| (Connection::Codex(bridge), incoming)),
+            AgentLaunch::Gemini(options) if options.native_acp => {
+                if let Some(folder) = options.account_home.clone() {
+                    crate::agents::gemini::launch::require_isolated_token(&folder).map_err(TransportError::Io)?;
+                    let program = spec.program.clone();
+                    tokio::task::spawn_blocking(move || {
+                        crate::agents::gemini::probe::verify_file_auth(&program, Duration::from_secs(15))?;
+                        crate::agents::gemini::launch::prepare_file_auth(&folder)
+                    }).await.map_err(|error| TransportError::Io(error.to_string()))?.map_err(TransportError::Io)?;
+                }
+                Transport::spawn(spec, generation).await.map(|(transport, incoming)| (Connection::Acp(transport), incoming))
+            }
             AgentLaunch::Gemini(options) => GeminiBridge::spawn(spec, generation, options.clone())
                 .await
                 .map(|(bridge, incoming)| (Connection::Gemini(bridge), incoming)),

@@ -9,6 +9,14 @@
 //! and provider settings, workspace trust, the terminal, git writes, file
 //! writes, MCP installs, the runtime environment, deleting, and anything
 //! that opens something on the computer's screen.
+//!
+//! Two things follow from that list. The continuity archives are the
+//! computer's: saving one writes a file of the caller's choosing into
+//! ThingMaker's data, so a provider change made from the phone carries the
+//! recent excerpt only, as it did before archives existed. And a session
+//! opened from the phone runs on the account the computer would use: which
+//! account is spent is a provider setting, so `session_open` loses its
+//! `accountId` here ([`without_account`]).
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -147,6 +155,16 @@ impl<T: Serialize> Reply for Vec<T> {
     }
 }
 
+/// `session_open`'s arguments as a phone may send them: without the account
+/// to pin the session to. The session then runs on the account it was pinned
+/// to on the computer, or on the provider's active one.
+fn without_account(mut args: Value) -> Value {
+    if let Some(request) = args.get_mut("request").and_then(Value::as_object_mut) {
+        request.remove("accountId");
+    }
+    args
+}
+
 fn refused(error: DesktopError) -> Result<Value, Value> {
     Err(serde_json::to_value(error).unwrap_or(Value::Null))
 }
@@ -217,7 +235,10 @@ pub async fn dispatch(app: &AppHandle, command: &str, args: Value) -> Result<Val
         "session_queue" => async_call!(app, args, session::session_queue, "request"),
         "session_cancel" => async_call!(app, args, session::session_cancel, "handle"),
         "session_set_config_option" => async_call!(app, args, session::session_set_config_option, "request"),
-        "session_open" => async_call!(app, args, session::session_open, "request"),
+        "session_open" => {
+            let args = without_account(args);
+            async_call!(app, args, session::session_open, "request")
+        }
         "session_rename" => sync_call!(app, args, session::session_rename, "request"),
         "session_archive" => sync_call!(app, args, session::session_archive, "request"),
         "session_pin" => sync_call!(app, args, session::session_pin, "request"),
@@ -314,8 +335,23 @@ mod tests {
             assert!(source.contains(&format!("\"{command}\" =>")), "{command} is allowed but not routed");
         }
         assert!(!ALLOWED.iter().any(|command| command.starts_with("voice_")), "microphone and dictation must stay desktop-only");
-        for denied in ["workspace_trust", "terminal_open", "terminal_write", "git_push", "git_commit", "file_write_checked", "provider_login_start", "provider_logout", "runtime_env_set", "mcp_install", "settings_set", "odyssey_delete", "bigthing_rollback", "cleanup_run", "open_external", "app_quit", "config_write_file", "skill_create"] {
+        for denied in ["continuity_save", "continuity_attach", "continuity_read", "account_set_active", "accounts_list", "workspace_trust", "terminal_open", "terminal_write", "git_push", "git_commit", "file_write_checked", "provider_login_start", "provider_logout", "runtime_env_set", "mcp_install", "settings_set", "odyssey_delete", "bigthing_rollback", "cleanup_run", "open_external", "app_quit", "config_write_file", "skill_create"] {
             assert!(!ALLOWED.contains(&denied), "{denied} must not be reachable from a phone");
         }
+    }
+
+    #[test]
+    fn a_phone_cannot_choose_the_account_a_session_is_opened_on() {
+        let sent = serde_json::json!({ "request": { "workspaceId": "w", "mode": { "mode": "new" }, "provider": "claude", "accountId": "work", "model": "sonnet" } });
+        let kept = without_account(sent);
+        assert_eq!(kept, serde_json::json!({ "request": { "workspaceId": "w", "mode": { "mode": "new" }, "provider": "claude", "model": "sonnet" } }));
+        let request: session::OpenRequest = arg(&kept, "request").unwrap();
+        assert!(request.account_id.is_none());
+        // The route itself goes through it, and nothing else reads the field.
+        let source = include_str!("dispatch.rs");
+        let route = source.split("\"session_open\" => {").nth(1).unwrap();
+        assert!(route.trim_start().starts_with("let args = without_account(args);"));
+        // Anything that is not the request object is passed through untouched.
+        assert_eq!(without_account(serde_json::json!({ "request": "odd" })), serde_json::json!({ "request": "odd" }));
     }
 }

@@ -25,6 +25,7 @@ import type {
   QuotaSnapshot,
 } from "@thingmaker/contracts";
 import { t } from "./i18n";
+import { isQuotaExhaustion } from "./quotaRecovery";
 
 export type Role = "user" | "agent" | "thought";
 
@@ -91,6 +92,8 @@ export type Projection = {
   exit: ExitInfo | null;
   /** The account's quota as the agent last reported it. */
   quota: QuotaSnapshot | null;
+  /** Whether this session's latest reading or failure reported exhaustion. */
+  quotaFailure: boolean;
   /** Agent-reported session title (session_info_update), when any. */
   title: string | null;
   /** Latest `config_option_update` payload (or the attach snapshot's options). */
@@ -135,6 +138,7 @@ export function emptyProjection(): Projection {
     tokens: null,
     exit: null,
     quota: null,
+    quotaFailure: false,
     title: null,
     configOptions: null,
     lastSequence: "0",
@@ -318,6 +322,7 @@ export function applyEvent(projection: Projection, envelope: EventEnvelope): Pro
     case "quota": {
       const { type: _type, ...quota } = payload;
       projection.quota = quota;
+      projection.quotaFailure = quota.status === "rejected";
       break;
     }
     case "diagnostic":
@@ -334,13 +339,16 @@ export function applyEvent(projection: Projection, envelope: EventEnvelope): Pro
       // composer, the activity strip and the reply itself all say so. Only
       // the outcomes you would act on leave a line in the transcript.
       if (payload.effect === "started") {
-        if (payload.kind === "foreground") projection.foreground = "running";
+        if (payload.kind === "foreground") { projection.foreground = "running"; projection.quotaFailure = false; }
         else if (payload.turnId !== undefined) projection.autonomous.add(payload.turnId);
       } else if (payload.effect === "cancelling") {
         if (payload.kind === "foreground") projection.foreground = "cancelling";
         pushCard(projection, { kind: "turn", text: t("cancellation requested") }, envelope.sequence);
       } else if (payload.effect === "settled") {
-        if (payload.kind === "foreground") projection.foreground = payload.phase;
+        if (payload.kind === "foreground") {
+          projection.foreground = payload.phase;
+          projection.quotaFailure = payload.phase === "failed" && (projection.quotaFailure || isQuotaExhaustion(`${payload.stopReason ?? ""} ${payload.error ?? ""}`));
+        }
         else if (payload.turnId !== undefined) projection.autonomous.delete(payload.turnId);
         projection.settledTurns += 1;
         if (payload.phase !== "succeeded") {

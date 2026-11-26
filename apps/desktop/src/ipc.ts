@@ -9,6 +9,8 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import {
   COMMANDS,
   type BackgroundOutput,
+  type ContinuityArchive,
+  type ContinuityPage,
   type EnqueueOutcome,
   type KeepAwakeStatus,
   type ProviderUpdateResult,
@@ -169,6 +171,8 @@ export type OpenRequest = {
   mode: { mode: "new" } | { mode: "resume"; session_id: string } | { mode: "fork"; session_id: string };
   /** Which provider to launch. On a resume the session's own record wins. */
   provider?: Provider;
+  /** Pin this session to an account without changing the provider's active account. */
+  accountId?: string;
   model?: string;
   reasoningEffort?: string;
   /** The team the session starts with; absent keeps its own, or the default. */
@@ -241,6 +245,9 @@ export const api = {
   sessionSetConfigOption: (handle: SessionHandle, configId: string, value: unknown) =>
     call<unknown>(COMMANDS.sessionSetConfigOption, { request: { handle, configId, value } }),
   sessionStop: (handle: SessionHandle) => call<ExitInfo>(COMMANDS.sessionStop, { handle }),
+  continuitySave: (handle: SessionHandle, markdown: string) => call<ContinuityArchive>(COMMANDS.continuitySave, { handle, markdown }),
+  continuityAttach: (source: SessionHandle, target: SessionHandle, archiveId: string) => call<void>(COMMANDS.continuityAttach, { source, target, archiveId }),
+  continuityRead: (handle: SessionHandle, archiveId: string, offset = 0, limit = 12000) => call<ContinuityPage>(COMMANDS.continuityRead, { handle, archiveId, offset, limit }),
   sessionListOpen: () => call<OpenSessionEntry[]>(COMMANDS.sessionListOpen),
   /**
    * Retained events after `after`, fetched a page at a time: a long session's

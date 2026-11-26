@@ -619,7 +619,7 @@ impl Delegation {
             orchestrator: spec.orchestrator.clone(),
             root: spec.root.clone(),
             name: spec.slot.name.clone(),
-            provider: Provider::Gemini,
+            provider: spec.slot.provider,
             job_id: spec.job_id.clone(),
         };
         for line in text.lines().filter_map(|line| line.strip_prefix("TEAM_CHAT ")).take(16) {

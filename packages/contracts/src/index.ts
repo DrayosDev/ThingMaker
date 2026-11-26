@@ -171,10 +171,10 @@ export const PROVIDER_LABELS: Record<Provider, string> = { claude: "Claude Code"
 export const PROVIDER_SHORT: Record<Provider, string> = { claude: "CC", codex: "CX", gemini: "GM", local: "LM" };
 /**
  * Providers that can lead a team. An orchestrator has to take the session's
- * own `team` MCP server; Antigravity's `agy` only reads MCP servers from its
- * global configuration, so Gemini is a worker or a plain session.
+ * own `team` MCP server. Gemini team sessions use native `agy acp` to receive
+ * session-local servers without changing the user's shared configuration.
  */
-export const ORCHESTRATOR_PROVIDERS: readonly Provider[] = ["claude", "codex", "local"] as const;
+export const ORCHESTRATOR_PROVIDERS: readonly Provider[] = ["claude", "codex", "gemini", "local"] as const;
 
 /**
  * Local Models: models in Ollama on this computer, free and private. A model
@@ -348,6 +348,15 @@ export type Snapshot = {
   handle: SessionHandle;
   /** The provider this attachment runs on, and so which account it spends. */
   provider: Provider;
+  /** Account fixed when this attachment opened; independent of the global picker. */
+  accountId?: string | null;
+  /**
+   * Whether this attachment has the tools to lead a team. One without them
+   * (a Gemini session opened without a team, a local chat) cannot be given a
+   * team while it runs, and cannot read a continuity archive. Absent on an
+   * older host: assume it has.
+   */
+  leadsTeam?: boolean;
   historyStart: DecimalId;
   historyDropped: number;
   /** The agent's own id for the session, once `session/new` has answered. */
@@ -415,9 +424,9 @@ export function asConfigOptions(value: unknown): SessionConfigOption[] {
   return out;
 }
 
-/** Whether a config option is the reasoning effort, by either dialect's id. */
+/** Whether a config option is the reasoning effort, by the provider's advertised id. */
 export function isEffortOption(configId: string): boolean {
-  return configId === "effort" || configId === "reasoning_effort";
+  return configId === "effort" || configId === "reasoning_effort" || configId === "thought_level";
 }
 
 export type SubmissionOutcome =
@@ -825,7 +834,7 @@ export type OnReport = "wait" | "continue";
 export type OnPlanChange = "tasks_auto" | "review" | "auto";
 /** Which orchestrator a goal runs on. `either` starts where it is and moves
  *  when the account it is on is spent; the other two pin it. */
-/** Who runs a Big Thing goal. Gemini cannot lead (it takes no session MCP server). */
+/** Who runs a Big Thing goal. Separate from ordinary saved-team leadership. */
 export type Orchestrator = "claude" | "codex" | "either";
 
 /** What the Claude account said about itself when it was last asked.
@@ -1637,7 +1646,19 @@ export type UiPrefs = {
   followUp: "queue" | "steer";
   /** Whether a newer ThingMaker found at startup is offered in a popup. Absent on older saves: on. */
   updateReminder?: boolean;
+  /** Save a private, readable context archive on a leader change. Absent means on. */
+  autoContinuity?: boolean;
 };
+
+/**
+ * One session's visible conversation, saved as immutable Markdown in
+ * ThingMaker's private data directory when its work moved to another leader.
+ * `parent` is the archive that session was itself handed, when it was a
+ * continuation: a line of hand-offs is read link by link, never copied.
+ */
+export type ContinuityArchive = { id: string; path: string; bytes: number; createdAtUnixMs: number; chars?: number; provider?: Provider; parent?: string | null };
+/** Character offsets count Unicode code points, matching the team reader. */
+export type ContinuityPage = { archive: ContinuityArchive; text: string; nextOffset: number | null; totalChars: number };
 
 /** A newer ThingMaker release than the running one (REL-03). */
 export type AvailableUpdate = { version: string; notes?: string; publishedAtUnixMs?: number };
@@ -1835,6 +1856,9 @@ export const COMMANDS = {
   sessionCancel: "session_cancel",
   sessionSetConfigOption: "session_set_config_option",
   sessionStop: "session_stop",
+  continuitySave: "continuity_save",
+  continuityAttach: "continuity_attach",
+  continuityRead: "continuity_read",
   sessionListOpen: "session_list_open",
   sessionArchive: "session_archive",
   sessionPin: "session_pin",

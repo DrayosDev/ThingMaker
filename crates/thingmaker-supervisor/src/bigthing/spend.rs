@@ -159,7 +159,7 @@ impl Engine {
         let last_milestone = loaded.journal.iter().find(|entry| entry.kind == JournalKind::Continuation).and_then(|entry| entry.milestone_id.clone());
         let starting = last_milestone.as_deref() != Some(loaded.milestones[index].id.as_str());
         let may_move = goal.orchestrator == Orchestrator::Either && journal::last_move_at(&loaded.journal).is_none_or(|at| now - at >= FAILOVER_COOLDOWN_MS);
-        let others: Vec<Provider> = self.inner.host.usable_providers().into_iter().filter(|provider| *provider != live.provider && provider.can_orchestrate()).collect();
+        let others: Vec<Provider> = self.inner.host.usable_providers().into_iter().filter(|provider| *provider != live.provider && provider.can_lead_goal()).collect();
 
         let verdict = forecast(&costs, live.provider, usage.as_ref(), starting, now);
         let note = match &verdict {

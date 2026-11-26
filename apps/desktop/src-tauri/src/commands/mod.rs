@@ -13,6 +13,7 @@ pub mod voice;
 pub mod artifacts;
 pub mod attachments;
 pub mod delegation;
+pub mod continuity;
 pub mod forks;
 pub mod git;
 pub mod mcp;

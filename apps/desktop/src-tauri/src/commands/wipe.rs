@@ -14,6 +14,8 @@
 //!   removed: the transcript, its subagents and tool results, file history,
 //!   task list and session environment;
 //! - the prompt-history lines of those sessions go too;
+//! - so do the continuity archives ThingMaker kept of those conversations
+//!   for a change of leader, which are its own copies of what was said;
 //! - every path is resolved first and must be inside the provider's folder.
 //!
 //! What the providers keep on their side is not touched: that is theirs, and
@@ -148,6 +150,12 @@ pub(crate) async fn wipe_workspace(state: &AppState, workspace_id: &str) -> Comm
             Ok(false) => {}
             Err(problem) => report.problems.push(problem),
         }
+    }
+    // And the copies of those conversations kept for a change of leader.
+    let wiped: Vec<(Provider, String)> = sessions.iter().map(|session| (session.provider, session.agent_session_id.clone())).collect();
+    match super::continuity::forget_sessions(state, &root, &wiped) {
+        Ok(archives) => report.files_removed += archives,
+        Err(error) => report.problems.push(format!("The continuity archives of these sessions could not be removed: {}", error.message)),
     }
     tracing::info!(workspace = %workspace_id, claude = report.claude_sessions, codex = report.codex_sessions, files = report.files_removed, "wiped sessions");
     Ok(report)
@@ -322,6 +330,40 @@ mod tests {
     fn write(path: &Path, text: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_wipe_takes_the_continuity_archives_of_the_sessions_it_deletes() {
+        use thingmaker_supervisor::continuity::{Identity, Store};
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = AppState::initialize(&temp.path().join("data"), None).unwrap();
+        state.home = Some(temp.path().join("home"));
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let root = project.canonicalize().unwrap();
+        let workspace = state.with_storage(|s| s.workspace_upsert(&root.to_string_lossy(), "~/project", "w-1")).unwrap();
+        state.with_storage(|s| s.session_upsert(&workspace.id, "claude-gone", SessionOrigin::Desktop, Provider::Claude)).unwrap();
+        state.with_storage(|s| s.session_upsert(&workspace.id, "gemini-kept", SessionOrigin::Desktop, Provider::Gemini)).unwrap();
+        let store = Store::open(&state.data_dir).unwrap();
+        let wiped = Identity::new(&root, Provider::Claude, "work".into(), "claude-gone".into()).unwrap();
+        let heir = Identity::new(&root, Provider::Gemini, String::new(), "gemini-kept".into()).unwrap();
+        let secret = store.save(&wiped, "what was said to Claude").unwrap();
+        store.attach(&wiped, &heir, &secret.id).unwrap();
+        let own = store.save(&heir, "what was said to Gemini").unwrap();
+        assert_eq!(own.parent.as_deref(), Some(secret.id.as_str()));
+
+        let report = wipe_workspace(&state, &workspace.id).await.unwrap();
+
+        assert!(report.problems.is_empty(), "{:?}", report.problems);
+        assert_eq!((report.claude_sessions, report.files_removed), (1, 1));
+        assert!(!Path::new(&secret.path).exists(), "the copy of the wiped conversation is gone");
+        // Nobody reads it through the session that inherited it either.
+        assert!(store.chain(&heir).unwrap().is_empty());
+        // A session the wipe does not delete keeps its own archive.
+        assert_eq!(store.read(&heir, &own.id, None, None).unwrap().text, "what was said to Gemini");
+        // Forgetting the workspace takes that one too.
+        assert_eq!(super::super::continuity::forget_workspace(&state, &root).unwrap(), 1);
+        assert!(!Path::new(&own.path).exists());
     }
 
     #[cfg(unix)]

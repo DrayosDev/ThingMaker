@@ -67,8 +67,9 @@ pub enum Provider {
     #[default]
     Claude,
     Codex,
-    /// Antigravity's `agy`: a worker or a plain session, never an
-    /// orchestrator (it cannot take a session's own MCP server).
+    /// Antigravity's `agy`: a worker or a plain session on its stream-json
+    /// mode, and an orchestrator on native `agy acp`, the only mode that
+    /// takes a session's own MCP server.
     Gemini,
     /// Models in Ollama on this computer: free, and private.
     Local,
@@ -78,9 +79,24 @@ impl Provider {
     pub const ALL: [Provider; 4] = [Provider::Claude, Provider::Codex, Provider::Gemini, Provider::Local];
 
     /// Whether a session on this provider can lead a team: it has to take
-    /// the session's own `team` MCP server.
+    /// the session's own `team` MCP server. Gemini takes one only over
+    /// native `agy acp`, which is what a Gemini session that leads a team is
+    /// opened on.
     pub fn can_orchestrate(self) -> bool {
+        true
+    }
+
+    /// Whether a worker on this provider is handed its own reduced `team`
+    /// server. A Gemini worker is not: it stays on the stream-json bridge,
+    /// which cannot forward one, and takes part in the agent chat through
+    /// its replies instead (`TEAM_CHAT` lines). The two are never both given.
+    pub fn worker_team_server(self) -> bool {
         !matches!(self, Self::Gemini)
+    }
+
+    /// Big Thing's policy/schema remains separate from ordinary team leadership.
+    pub fn can_lead_goal(self) -> bool {
+        matches!(self, Self::Claude | Self::Codex | Self::Local)
     }
 
     pub fn as_str(self) -> &'static str {
