@@ -1,8 +1,15 @@
 import type { AccountView, Provider, Snapshot } from "@thingmaker/contracts";
 
-/** Whether provider-wide readings apply to the account pinned to this session. */
+/**
+ * Whether provider-wide readings apply to the account this session runs on.
+ * Until the provider's accounts have been read there is no telling which one
+ * is active: the session is taken to be on it, as every session was before
+ * one could be pinned, rather than its readings being dropped.
+ */
 export function sessionUsesActiveAccount(snapshot: Pick<Snapshot, "provider" | "accountId">, accounts: Partial<Record<Provider, AccountView[]>>): boolean {
-  return !snapshot.accountId || snapshot.accountId === (accounts[snapshot.provider]?.find((account) => account.active)?.id ?? "default");
+  const known = accounts[snapshot.provider];
+  if (!snapshot.accountId || !known) return true;
+  return snapshot.accountId === (known.find((account) => account.active)?.id ?? "default");
 }
 
 /** Recognise explicit exhaustion, not generic throttling or transport errors. */

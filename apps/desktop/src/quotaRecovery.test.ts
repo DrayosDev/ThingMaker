@@ -7,6 +7,10 @@ describe("quota exhaustion", () => {
     expect(sessionUsesActiveAccount({ provider: "codex", accountId: "work" }, accounts)).toBe(false);
     expect(sessionUsesActiveAccount({ provider: "codex", accountId: "default" }, accounts)).toBe(true);
     expect(sessionUsesActiveAccount({ provider: "codex" }, accounts)).toBe(true);
+    // Before the accounts are read, a session on the active account that is
+    // not the default one must not lose its readings.
+    expect(sessionUsesActiveAccount({ provider: "codex", accountId: "work" }, {})).toBe(true);
+    expect(sessionUsesActiveAccount({ provider: "claude", accountId: "work" }, accounts)).toBe(true);
   });
   it.each(["usageLimitExceeded", "insufficient_quota", "Your credits are exhausted", "out of quota", "usage limit reached", "You've hit your usage limit. Try again in 2 hours.", "You've hit your limit · resets 3pm"])("recognises %s", (message) => {
     expect(isQuotaExhaustion(message)).toBe(true);
