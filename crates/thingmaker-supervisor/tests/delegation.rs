@@ -119,6 +119,7 @@ fn team() -> Combo {
             WorkerSlot { name: "sonnet".into(), provider: Provider::Claude, model: Some("sonnet".into()), effort: None, capabilities: vec!["code".into(), "review".into()], note: None, prompt: None, resources: None },
         ],
         native_subagents: false,
+        ..Default::default()
     }
 }
 
@@ -498,7 +499,7 @@ async fn local_jobs_take_turns_on_the_one_gpu() {
     let Some((delegation, launcher, _)) = service(&[]) else { return };
     let dir = tempfile::tempdir().unwrap();
     let slot = |name: &str| WorkerSlot { name: name.into(), provider: Provider::Local, model: Some("@agent/qwen3:8b".into()), effort: None, capabilities: vec!["code".into()], note: None, prompt: None, resources: None };
-    delegation.register("lm-o", Provider::Local, dir.path().to_path_buf(), Combo { workers: vec![slot("first"), slot("second")], native_subagents: false });
+    delegation.register("lm-o", Provider::Local, dir.path().to_path_buf(), Combo { workers: vec![slot("first"), slot("second")], native_subagents: false, ..Default::default() });
     let task = |worker: &str| serde_json::from_value::<thingmaker_supervisor::delegation::jobs::DelegateArgs>(json!({ "task": "tidy the notes", "worker": worker })).unwrap();
     let one = delegation.delegate("lm-o", task("first")).unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;

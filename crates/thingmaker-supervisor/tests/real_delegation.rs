@@ -70,7 +70,7 @@ async fn run(orchestrator: Provider, worker: WorkerSlot) {
     let scratch = tempfile::tempdir().unwrap();
     let delegation = Delegation::new(Arc::new(RealLauncher), |job| eprintln!("job {} {:?} {:?}", job.id, job.status, job.error));
     let socket = DelegationSocket::bind(delegation.clone(), scratch.path().join("mcp.sock")).unwrap();
-    let combo = Combo { workers: vec![worker.clone()], native_subagents: false };
+    let combo = Combo { workers: vec![worker.clone()], native_subagents: false, ..Default::default() };
 
     let (model, effort) = match orchestrator {
         Provider::Claude => (Some("sonnet".to_string()), Some("low".to_string())),
@@ -184,7 +184,7 @@ async fn chat_reopens_the_original_conversation() {
     let _socket = DelegationSocket::bind(service.clone(), path).unwrap();
     let slot = |name: &str| WorkerSlot { name: name.into(), provider: Provider::Codex, model: None, effort: Some("low".into()), capabilities: vec![], note: None, prompt: None, resources: None };
     let team = "real-chat";
-    service.register(team, Provider::Codex, dir.path().into(), Combo { workers: vec![slot("Keeper"),slot("Asker")], native_subagents: false });
+    service.register(team, Provider::Codex, dir.path().into(), Combo { workers: vec![slot("Keeper"),slot("Asker")], native_subagents: false, ..Default::default() });
     let word = uuid::Uuid::new_v4().simple().to_string();
     let keeper = service.delegate(team, DelegateArgs { worker: Some("Keeper".into()), task:format!("Remember this private code in this conversation only: {word}. Reply READY now. Never write a file or use shell. Later, if another team member asks for the code, reply with it through chat_send."), ..Default::default() }).unwrap();
     let done = service.await_jobs(team, &[keeper.id.clone()], Duration::from_secs(100), false).await.unwrap();

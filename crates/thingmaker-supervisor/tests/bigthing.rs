@@ -427,6 +427,7 @@ async fn the_runner_hands_ready_tasks_to_workers_in_parallel_and_has_them_review
             WorkerSlot { name: "sonnet".into(), provider: Provider::Claude, model: None, effort: None, capabilities: vec!["review".into()], note: None, prompt: None, resources: None },
         ],
         native_subagents: false,
+        ..Default::default()
     };
     let (goal_id, _live) = fixture.goal_with(1, Some(team)).await;
     {
@@ -461,6 +462,7 @@ async fn a_review_loop_sends_the_work_back_and_the_run_waits_for_your_approval()
     let team = Combo {
         workers: vec![WorkerSlot { name: "luna".into(), provider: Provider::Codex, model: Some("gpt-6-luna".into()), effort: None, capabilities: vec!["code".into()], note: None, prompt: None, resources: None }],
         native_subagents: false,
+        ..Default::default()
     };
     let (goal_id, live) = fixture.goal_with(1, Some(team)).await;
     {

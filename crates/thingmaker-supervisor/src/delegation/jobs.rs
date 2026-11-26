@@ -1531,7 +1531,7 @@ mod tests {
     #[test]
     fn a_pinned_job_routes_against_its_own_worker_alone() {
         let slot = |name: &str, provider| WorkerSlot { name: name.into(), provider, model: None, effort: None, capabilities: Vec::new(), note: None, prompt: None, resources: None };
-        let combo = Combo { workers: vec![slot("Reviewer A", Provider::Claude), slot("Reviewer B", Provider::Codex)], native_subagents: false };
+        let combo = Combo { workers: vec![slot("Reviewer A", Provider::Claude), slot("Reviewer B", Provider::Codex)], native_subagents: false, ..Default::default() };
         let pinned = DelegateArgs { task: "review".into(), worker: Some("Reviewer A".into()), pinned: true, ..DelegateArgs::default() };
         assert_eq!(team_for(&combo, &pinned, Provider::Claude).workers.iter().map(|w| w.name.as_str()).collect::<Vec<_>>(), ["Reviewer A"]);
         // With Claude spent, the router has nobody to move it to: it waits.
@@ -1546,7 +1546,7 @@ mod tests {
     #[test]
     fn a_local_lead_hires_only_local_helpers() {
         let slot = |name: &str, provider| WorkerSlot { name: name.into(), provider, model: None, effort: None, capabilities: Vec::new(), note: None, prompt: None, resources: None };
-        let combo = Combo { workers: vec![slot("Cloud", Provider::Claude), slot("Coder", Provider::Local)], native_subagents: false };
+        let combo = Combo { workers: vec![slot("Cloud", Provider::Claude), slot("Coder", Provider::Local)], native_subagents: false, ..Default::default() };
         let args = DelegateArgs { task: "edit".into(), ..DelegateArgs::default() };
         let team = team_for(&combo, &args, Provider::Local);
         assert_eq!(team.workers.iter().map(|w| w.name.as_str()).collect::<Vec<_>>(), ["Coder"]);
