@@ -559,3 +559,20 @@ async fn chat_steers_an_active_worker_or_waits_for_the_next_turn() {
         service.release("lead").await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_empty_continue_job_starts_a_fresh_worker_not_a_follow_up() {
+    let Some((delegation, launcher, _)) = service(&[]) else { return };
+    let dir = tempfile::tempdir().unwrap();
+    delegation.register("blank", Provider::Claude, dir.path().to_path_buf(), team());
+    // What a model sends when it fills in every field of the tool.
+    for blank in ["", "  "] {
+        let job = delegation.delegate("blank", DelegateArgs { task: "Read the brief".into(), worker: Some("sonnet".into()), continue_job: Some(blank.into()), ..Default::default() }).unwrap();
+        assert_eq!(job.continues, None, "{blank:?} is not a job to follow");
+        let done = delegation.await_jobs("blank", std::slice::from_ref(&job.id), Duration::from_secs(30), false).await.unwrap();
+        assert_eq!(done[0].status, JobStatus::Succeeded, "{:?}", done[0]);
+        assert_eq!(done[0].continues, None);
+    }
+    assert!(!launcher.launched.lock().unwrap().is_empty());
+    delegation.release("blank").await;
+}

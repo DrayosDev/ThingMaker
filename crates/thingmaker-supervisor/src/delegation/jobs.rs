@@ -701,7 +701,10 @@ impl Delegation {
                 result: None,
                 error: None,
                 rerouted_from: route.rerouted_from.clone(),
-                continues: args.continue_job.clone(),
+                // Only a job that really follows another: an agent that fills
+                // in `continue_job: ""` is starting a fresh worker, which
+                // needs the brief and its standing instructions.
+                continues: args.continue_job.as_deref().map(str::trim).filter(|previous| !previous.is_empty()).map(str::to_string),
                 worker_session: reuse.as_ref().map(|(_, actor)| actor.handle().id.clone()),
                 agent_session_id: resume.clone(),
                 tool_calls: 0,
