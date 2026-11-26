@@ -372,6 +372,8 @@ export const settings: Record<string, string> = {
   "Delivered": "Entregado",
   "Pending": "Pendiente",
   "Not delivered: {reason}": "No entregado: {reason}",
+  "agent chat": "chat de agentes",
+  "Sent by another agent of this team, not by you.": "Enviado por otro agente de este equipo, no por ti.",
   "Agent chat is paused: {count} messages in a row started work without you. It resumes when you write in this session.": "El chat de agentes está en pausa: {count} mensajes seguidos pusieron trabajo en marcha sin ti. Se reanuda cuando escribas en esta sesión.",
   "Agent chat has reached this session's limit of {count} messages. The agents only report to the lead from here on.": "El chat de agentes ha llegado al límite de {count} mensajes de esta sesión. A partir de aquí los agentes solo informan a quien dirige.",
   "answering a team message": "responde a un mensaje del equipo",

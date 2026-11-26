@@ -260,6 +260,11 @@ type State = {
   teamChat: Record<string, TeamChatView>;
   /** Reads a session's agent chat again; false when the host could not say. */
   loadTeamChat: (sessionId: string) => Promise<boolean>;
+  /** Tokens of prompts shaped like an agent's message that the host has no
+   *  receipt for in that session: the person's own text, shown as theirs. */
+  teamChatUnknown: Record<string, string[]>;
+  /** Asks the host whether it wrote the prompt with this token into the session. */
+  checkTeamChat: (sessionId: string, token: string) => Promise<void>;
   /** Ultra-Reviews per session, by the agent's id for it, newest first. */
   ultraReviews: Record<string, UltraReview[]>;
   loadUltraReviews: (host: string) => Promise<void>;
@@ -1029,6 +1034,9 @@ function refreshAccountModels(get: Get, set: Set, provider: Provider) {
   void get().loadProviderModels(provider, true);
 }
 
+/** Receipt checks under way, by session and token, so a card redrawn while one runs does not ask again. */
+const teamChatChecks = new Set<string>();
+
 export const useStore = create<State>((set, get) => ({
   providers: null,
   providerVersions: null,
@@ -1059,6 +1067,7 @@ export const useStore = create<State>((set, get) => ({
   teams: {},
   jobs: {},
   teamChat: {},
+  teamChatUnknown: {},
   ultraReviews: {},
   defaultCombo: EMPTY_COMBO,
   providerModels: {},
@@ -2683,6 +2692,21 @@ export const useStore = create<State>((set, get) => ({
       return true;
     } catch {
       return false;
+    }
+  },
+
+  async checkTeamChat(sessionId, token) {
+    const known = () => get().teamChat[sessionId]?.received?.some((receipt) => receipt.token === token) ?? false;
+    const check = `${sessionId}|${token}`;
+    if (known() || get().teamChatUnknown[sessionId]?.includes(token) || teamChatChecks.has(check)) return;
+    teamChatChecks.add(check);
+    try {
+      // The host keeps a receipt before it writes the prompt, so one read
+      // settles it: there, or never written by the host.
+      await get().loadTeamChat(sessionId);
+      if (!known()) set({ teamChatUnknown: { ...get().teamChatUnknown, [sessionId]: [...(get().teamChatUnknown[sessionId] ?? []), token] } });
+    } finally {
+      teamChatChecks.delete(check);
     }
   },
 

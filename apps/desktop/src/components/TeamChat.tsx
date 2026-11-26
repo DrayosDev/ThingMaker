@@ -3,10 +3,11 @@
  * Agents tab, and a line above the conversation when they can say no more.
  * The host keeps the chat and bounds it; this only shows it.
  */
-import { useEffect, useState } from "react";
-import type { TeamChatMessage } from "@thingmaker/contracts";
+import { useEffect, useState, type ReactNode } from "react";
+import { PROVIDER_LABELS, type TeamChatMessage } from "@thingmaker/contracts";
 import { useStore } from "../store";
 import { t } from "../i18n";
+import { ProviderMark } from "./ProviderMark";
 
 const NONE: TeamChatMessage[] = [];
 
@@ -15,6 +16,44 @@ function stopLine(stopped: "paused" | "full", unprompted: number, total: number)
   return stopped === "paused"
     ? t("Agent chat is paused: {count} messages in a row started work without you. It resumes when you write in this session.", { count: unprompted })
     : t("Agent chat has reached this session's limit of {count} messages. The agents only report to the lead from here on.", { count: total });
+}
+
+/** An agent's name as the person reads it: the lead has an address, not a name of its own. */
+function agentName(address: string, name: string): string {
+  return address === "orchestrator" ? t("Orchestrator") : name;
+}
+
+/**
+ * A prompt in the transcript that is shaped like another agent's message.
+ *
+ * With the host's receipt for its token it is drawn where an answer is, on
+ * the left under the sender's provider mark and name: it is not something the
+ * person typed, and must not look it. Without one it is the person's own
+ * text, and is drawn as theirs (`own`). Nothing is drawn while the host is
+ * being asked, which is one read when the card first appears.
+ */
+export function TeamChatTurn({ sessionId, token, own, children }: { sessionId: string; token: string; own: ReactNode; children: ReactNode }) {
+  const receipt = useStore((s) => s.teamChat[sessionId]?.received?.find((entry) => entry.token === token));
+  const unknown = useStore((s) => s.teamChatUnknown[sessionId]?.includes(token) ?? false);
+  const checkTeamChat = useStore((s) => s.checkTeamChat);
+  useEffect(() => {
+    if (!receipt && !unknown) void checkTeamChat(sessionId, token);
+  }, [receipt, unknown, checkTeamChat, sessionId, token]);
+  if (!receipt) return unknown ? <>{own}</> : null;
+  const name = agentName(receipt.from, receipt.fromName);
+  return (
+    <article className="card card-agent card-agent-marked card-team-chat">
+      <span className="card-author" title={`${name} · ${PROVIDER_LABELS[receipt.fromProvider]}`}>
+        <ProviderMark provider={receipt.fromProvider} size={15} />
+      </span>
+      <div className="card-content">
+        <header className="small team-chat-from" title={t("Sent by another agent of this team, not by you.")}>
+          <strong>{name}</strong> <span className="muted">· {t("agent chat")}</span>
+        </header>
+        {children}
+      </div>
+    </article>
+  );
 }
 
 export function TeamChat({ sessionId }: { sessionId: string }) {
@@ -40,7 +79,7 @@ export function TeamChat({ sessionId }: { sessionId: string }) {
     {view?.stopped && <p className="small chip-warn-text" role="status">{stopLine(view.stopped, view.unpromptedLimit, view.messageLimit)}</p>}
     {!failed && !messages.length && <p className="small muted">{t("No messages yet.")}</p>}
     <ol className="jobs-list">{messages.map(message => <li key={message.id} className="job-row">
-      <div><strong>{message.fromName} → {message.toName}</strong>{" "}
+      <div><strong>{agentName(message.from, message.fromName)} → {agentName(message.to, message.toName)}</strong>{" "}
         <small className="muted">#{message.id}{message.replyTo && ` ↳ #${message.replyTo}`} · {new Date(message.sentAt).toLocaleTimeString()}</small>
       </div>
       <p style={{whiteSpace:"pre-wrap", overflowWrap:"anywhere"}}>{message.text}</p>

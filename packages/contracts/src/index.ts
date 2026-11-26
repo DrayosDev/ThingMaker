@@ -2078,6 +2078,8 @@ export interface TeamChatMessage {
   to: string;
   fromName: string;
   toName: string;
+  /** The sender's provider, for its mark beside the message. */
+  fromProvider: Provider;
   text: string;
   replyTo: number | null;
   sentAt: number;
@@ -2092,9 +2094,26 @@ export interface TeamChatMessage {
  */
 export type TeamChatStop = "paused" | "full";
 
+/**
+ * The host's record that it wrote an agent's message into a conversation,
+ * under the token that prompt carries. A prompt is shown as another agent's
+ * only when its token has one of these for the session it is in.
+ */
+export interface TeamChatReceipt {
+  token: string;
+  /** The sender's address: `orchestrator`, or a job id. */
+  from: string;
+  fromName: string;
+  fromProvider: Provider;
+  sentAt: number;
+}
+
 /** A session's agent chat as the host reports it. */
 export interface TeamChatView {
+  /** The messages of the team this session leads; none for a worker's. */
   messages: TeamChatMessage[];
+  /** The agent messages written into this session's own conversation. */
+  received?: TeamChatReceipt[];
   stopped?: TeamChatStop;
   /** Messages in a row that may start work before the chat pauses. */
   unpromptedLimit: number;

@@ -20,7 +20,7 @@ import { useStore, type LiveSession } from "./store";
 
 const handle = { id: "lead", attachmentGeneration: "1" };
 const question: TeamChatMessage = {
-  id: 1, from: "job-1", fromName: "Builder", to: "job-2", toName: "Reviewer",
+  id: 1, from: "job-1", fromName: "Builder", fromProvider: "codex", to: "job-2", toName: "Reviewer",
   text: "Which field?", replyTo: null, sentAt: 1, delivered: true, error: null,
 };
 const view = (extra: Partial<TeamChatView> = {}): TeamChatView => ({ messages: [], unpromptedLimit: 6, messageLimit: 60, ...extra });

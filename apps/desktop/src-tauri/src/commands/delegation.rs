@@ -18,7 +18,7 @@ use thingmaker_supervisor::{
         Combo, Delegation, JobView, WorkerLauncher, WorkerSpec,
         jobs::{
             BoxFuture, RetryPolicy,
-            chat::{ChatEvent, ChatView},
+            chat::{ChatEvent, ChatView, Receipt},
         },
         orchestrator_guidance,
         socket::{DelegationSocket, RELAY_ARG, server_entry, socket_path},
@@ -35,6 +35,43 @@ pub const JOB_EVENT: &str = "thingmaker://job";
 /// renderer asks for the chat again. Not passed on to the phone, which reads
 /// the chat when it shows it.
 pub const TEAM_CHAT_EVENT: &str = "thingmaker://team-chat";
+/// Settings key for the receipts of the agent messages written into one
+/// conversation, scope `conversation:<the agent's id for it>`. They are what
+/// lets the transcript show such a prompt as its sender's rather than the
+/// person's, and they outlive the attachment: the provider replays the
+/// prompt when the session is reopened, and the receipt has to be there.
+pub const CHAT_RECEIPTS_KEY: &str = "teamChatReceipts";
+/// Receipts one conversation keeps, newest last. A session's chat holds
+/// sixty messages, so this is many reopenings of the same conversation.
+const CHAT_RECEIPTS_KEPT: usize = 1000;
+
+fn receipts_scope(agent_session_id: &str) -> String {
+    format!("conversation:{agent_session_id}")
+}
+
+/// Keeps a receipt with the conversation of the attachment it is for.
+fn keep_receipt(state: &AppState, recipient: &str, receipt: Receipt) {
+    let scope = receipts_scope(&state.agent_session_id(recipient));
+    let kept = state.with_storage(|s| {
+        let mut kept: Vec<Receipt> = s.setting_get(CHAT_RECEIPTS_KEY, &scope)?.unwrap_or_default();
+        if kept.iter().any(|known| known.token == receipt.token) {
+            return Ok(());
+        }
+        kept.push(receipt);
+        let extra = kept.len().saturating_sub(CHAT_RECEIPTS_KEPT);
+        kept.drain(..extra);
+        s.setting_set(CHAT_RECEIPTS_KEY, &scope, &kept)
+    });
+    if let Err(error) = kept {
+        tracing::warn!(%error, "an agent message's receipt was not kept; its transcript will show it as a prompt");
+    }
+}
+
+/// The receipts kept for an attachment's conversation.
+fn receipts(state: &AppState, handle: &str) -> Vec<Receipt> {
+    let scope = receipts_scope(&state.agent_session_id(handle));
+    state.with_storage(|s| s.setting_get(CHAT_RECEIPTS_KEY, &scope)).ok().flatten().unwrap_or_default()
+}
 /// Settings key for a team: scope `global` for the default a new session
 /// starts with, `session:<row id>` for one session's own.
 pub const COMBO_KEY: &str = "combo";
@@ -64,6 +101,13 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
     delegation.on_chat(move |event| match event {
         ChatEvent::Changed { session } => {
             let _ = chat.emit(TEAM_CHAT_EVENT, serde_json::json!({ "handle": session }));
+        }
+        // Kept before the prompt is written, so the transcript finds it.
+        ChatEvent::Receiving { recipient, receipt } => {
+            if let Some(state) = chat.try_state::<AppState>() {
+                keep_receipt(&state, &recipient, receipt);
+            }
+            let _ = chat.emit(TEAM_CHAT_EVENT, serde_json::json!({ "handle": recipient }));
         }
         _ => {}
     });
@@ -325,11 +369,25 @@ pub fn delegation_default_combo_set(combo: Combo, state: State<'_, AppState>) ->
     Ok(combo)
 }
 
-/// A live session's agent chat: its messages, and whether its agents may
-/// still send.
+/// A session's agent chat as the renderer reads it.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamChat {
+    #[serde(flatten)]
+    view: ChatView,
+    /// The agent messages written into this session's own conversation.
+    received: Vec<Receipt>,
+}
+
+/// A live session's agent chat: the messages of the team it leads and
+/// whether its agents may still send, and the receipts of the messages its
+/// own conversation was sent (a worker's has those and no team).
 #[tauri::command]
-pub fn delegation_chat(handle: SessionHandle, state: State<'_, AppState>) -> CommandResult<ChatView> {
-    Ok(delegation(&state)?.chat_view(&handle.id))
+pub fn delegation_chat(handle: SessionHandle, state: State<'_, AppState>) -> CommandResult<TeamChat> {
+    // The receipts are read whether or not the team service is up: a
+    // conversation reopened without it still holds the messages it was sent.
+    let view = state.delegation.get().map(|delegation| delegation.chat_view(&handle.id)).unwrap_or_default();
+    Ok(TeamChat { view, received: receipts(&state, &handle.id) })
 }
 
 /// A live session's jobs, oldest first.
@@ -388,4 +446,48 @@ pub fn delegation_retry_policy_set(policy: RetryPolicy, state: State<'_, AppStat
     state.with_storage(|s| s.setting_set(RETRY_KEY, GLOBAL_SCOPE, &policy)).map_err(storage_error)?;
     delegation(&state)?.set_retry_policy(policy);
     Ok(policy)
+}
+
+#[cfg(test)]
+mod chat_receipt_tests {
+    use super::*;
+
+    fn receipt(token: &str) -> Receipt {
+        Receipt { token: token.into(), from: "job-2".into(), from_name: "Builder".into(), from_provider: Provider::Codex, sent_at: 1 }
+    }
+
+    #[test]
+    fn receipts_are_kept_per_conversation_once_each_and_outlive_the_attachment() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::initialize(dir.path(), None).unwrap();
+        keep_receipt(&state, "lead-conversation", receipt("a"));
+        keep_receipt(&state, "lead-conversation", receipt("a"));
+        keep_receipt(&state, "lead-conversation", receipt("b"));
+        keep_receipt(&state, "worker-conversation", receipt("c"));
+        assert_eq!(receipts(&state, "lead-conversation"), [receipt("a"), receipt("b")]);
+        assert_eq!(receipts(&state, "worker-conversation"), [receipt("c")]);
+        assert!(receipts(&state, "someone-else").is_empty(), "a token means nothing in another conversation");
+        // The application restarts: the conversation is reopened from the
+        // provider's history, and its receipts are still there.
+        drop(state);
+        let state = AppState::initialize(dir.path(), None).unwrap();
+        assert_eq!(receipts(&state, "lead-conversation"), [receipt("a"), receipt("b")]);
+        let reply = serde_json::to_value(TeamChat { view: ChatView::default(), received: receipts(&state, "lead-conversation") }).unwrap();
+        assert_eq!(reply["received"][0], serde_json::json!({ "token": "a", "from": "job-2", "fromName": "Builder", "fromProvider": "codex", "sentAt": 1 }));
+        assert!(reply["messages"].as_array().unwrap().is_empty(), "the team's own chat sits beside them: {reply}");
+    }
+
+    #[test]
+    fn only_the_newest_receipts_of_a_conversation_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::initialize(dir.path(), None).unwrap();
+        let scope = receipts_scope("long");
+        let full: Vec<Receipt> = (0..CHAT_RECEIPTS_KEPT).map(|n| receipt(&format!("t{n}"))).collect();
+        state.with_storage(|s| s.setting_set(CHAT_RECEIPTS_KEY, &scope, &full)).unwrap();
+        keep_receipt(&state, "long", receipt("newest"));
+        let kept = receipts(&state, "long");
+        assert_eq!(kept.len(), CHAT_RECEIPTS_KEPT);
+        assert_eq!(kept[0].token, "t1");
+        assert_eq!(kept.last().unwrap().token, "newest");
+    }
 }

@@ -618,6 +618,10 @@ impl Delegation {
         if task.is_empty() {
             return Err("The task is empty. Describe the work the worker should do.".into());
         }
+        // What the jobs list and the worker's title say of a job a chat
+        // message started: the message, not the wrapper it travels in.
+        let shown = chat_message.and_then(|id| self.state().orchestrators.get(session).and_then(|team| team.chat.summary(id)));
+        let shown = shown.as_deref().unwrap_or(task);
         let now = now_unix_ms();
         let mut queued: Option<(Wait, u64)>;
         let mut attempt = 0;
@@ -723,7 +727,7 @@ impl Delegation {
                 provider: route.slot.provider,
                 model: route.slot.model.clone(),
                 effort: route.slot.effort.clone(),
-                task: cap(task, 2_000),
+                task: cap(shown, 2_000),
                 status: if queued.is_some() { JobStatus::Waiting } else { JobStatus::Starting },
                 result: None,
                 error: None,
@@ -783,7 +787,7 @@ impl Delegation {
         self.ensure_reaper();
         let service = self.clone();
         let job_id = view.id.clone();
-        let summary: String = task.lines().next().unwrap_or(task).chars().take(60).collect();
+        let summary: String = shown.lines().next().unwrap_or(shown).chars().take(60).collect();
         let title = format!("{} · {summary}", slot.name);
         let mcp_token = self.state().jobs.get(&job_id).and_then(|record| record.token.clone());
         let spec = WorkerSpec { orchestrator: session.to_string(), root, slot, job_id: job_id.clone(), title, mcp_token, resume, resume_revision };
@@ -1227,6 +1231,11 @@ impl Delegation {
     /// One worker turn: submit, then read the stream until it settles.
     async fn turn(&self, job_id: &str, worker: &SessionActor, prompt: &str) -> TurnOutcome {
         let mut subscription = worker.subscribe();
+        // A job a chat message started: the transcript is told whose prompt
+        // this is before it is written.
+        if let Some(receipt) = self.chat_receipt(job_id) {
+            self.chat_event(chat::ChatEvent::Receiving { recipient: worker.handle().id.clone(), receipt });
+        }
         match worker.submit_text(format!("{job_id}-{}", now_unix_ms()), prompt).await {
             Ok(SubmissionOutcome::Accepted) => self.chat_accepted(job_id),
             Ok(SubmissionOutcome::Rejected { error }) | Ok(SubmissionOutcome::OutcomeUnknown { error }) | Err(error) => {
