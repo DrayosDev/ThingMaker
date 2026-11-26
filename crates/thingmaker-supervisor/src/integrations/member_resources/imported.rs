@@ -495,6 +495,34 @@ mod tests {
         assert_eq!(status(&rebuilt, "claude").skills, 1);
     }
 
+    #[test]
+    fn a_skill_turned_off_in_claude_stays_off_through_its_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        let (home, config, codex) = (temp.path(), temp.path().join(".claude"), temp.path().join(".codex"));
+        // Claude Code names a skill without a frontmatter name after its folder,
+        // and its settings turn skills off by that folder name.
+        write(&config.join("skills/plain/SKILL.md"), "---\ndescription: No name of its own\n---\n");
+        write(&config.join("skills/renamed/SKILL.md"), "---\nname: other-name\ndescription: Named apart from its folder\n---\n");
+        write(&config.join("skills/kept/SKILL.md"), "---\ndescription: Left on\n---\n");
+        write(&config.join("settings.json"), r#"{"skillOverrides":{"plain":"off","renamed":"user-invocable-only"}}"#);
+        let off = |catalog: &ResourceCatalog| ["plain", "renamed", "kept"].map(|folder| {
+            let entry = catalog.entries.iter().find(|entry| entry.id == format!("skill:user:{folder}")).unwrap();
+            (entry.name.clone(), entry.available, entry.problem.clone().unwrap_or_default())
+        });
+        let native = off(&catalog_with_homes(home, &config, &codex, None).unwrap());
+        let imported = import_skills(home, &config, &codex, None, "claude").unwrap();
+        assert_eq!(status(&imported, "claude").skills, 3);
+        let turned_off = "Skill disabled for model invocation in Claude settings".to_string();
+        assert_eq!(off(&imported), [("plain".to_string(), false, turned_off.clone()), ("other-name".to_string(), false, turned_off), ("kept".to_string(), true, String::new())]);
+        assert_eq!(off(&imported).map(|(_, available, problem)| (available, problem)), native.map(|(_, available, problem)| (available, problem)), "importing changes nothing about what is on");
+        // The copy is the folder Claude Code and Codex would have read, name and all.
+        assert_eq!(skill_file(&imported, "skill:user:kept").parent().unwrap().file_name().unwrap(), "kept");
+        let kept = ResourceSelection { skills: vec!["skill:user:kept".into()], ..Default::default() };
+        assert!(resolve(&imported, &kept, &Default::default()).unwrap().skills[0].ends_with(":kept"));
+        let plain = ResourceSelection { skills: vec!["skill:user:plain".into()], ..Default::default() };
+        assert!(resolve(&imported, &plain, &Default::default()).is_err(), "nor can a saved selection start it");
+    }
+
     #[cfg(unix)]
     #[test]
     fn nothing_linked_from_outside_a_skill_is_copied() {

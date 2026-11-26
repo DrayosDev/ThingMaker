@@ -63,6 +63,11 @@ pub struct ResourceEntry {
     /// Hash of the SKILL.md this entry was read from.
     #[serde(skip)]
     skill_hash: String,
+    /// The skill's folder name where its provider keeps it: the name Claude
+    /// Code's settings know a skill of its own by, whatever its frontmatter
+    /// says and wherever a copy of it lives.
+    #[serde(skip)]
+    folder: String,
     #[serde(skip)]
     bridge_skill: bool,
     /// Listed from a plugin Claude Code did not install itself: it never
@@ -169,7 +174,7 @@ fn add_skills(out: &mut Vec<ResourceEntry>, directory: &Path, group: &str, prefi
             description: description(&text, front.description), group: group.into(), available: enabled && !disabled,
             problem: if !enabled { Some("Plugin disabled for this project".into()) } else { disabled.then(|| "Manual-only or forked skill; not supported by the member pilot".into()) }, runtime_name, config: Value::Null,
             revision: format!("{}:{revision}", file.display()), skill_hash: revision, source: if plugin.is_some() { "plugin".into() } else { ".claude/skills".into() },
-            plugin: plugin.map(str::to_string), unit_root: Some(directory.clone()), skill_path: Some(file), ..Default::default() });
+            plugin: plugin.map(str::to_string), unit_root: Some(directory.clone()), skill_path: Some(file), folder: name, ..Default::default() });
     }
 }
 
@@ -446,7 +451,7 @@ fn build(home: &Path, config_dir: &Path, codex_home: &Path, root: Option<&Path>,
     for (index, entry) in entries.iter_mut().enumerate() {
         if entry.kind == "skill" && entry.group != "thingmaker" { entry.duplicate_of = own.get(&entry.skill_hash).cloned(); }
         if entry.kind == "skill" && !entry.group.starts_with("plugin:") && matches!(entry.source.as_str(), ".claude/skills" | "imported-skills/claude")
-            && skill_overrides.get(&entry.name).is_some_and(|mode| mode == "off" || mode == "user-invocable-only") {
+            && skill_overrides.get(&entry.folder).is_some_and(|mode| mode == "off" || mode == "user-invocable-only") {
             entry.available = false;
             entry.problem = Some("Skill disabled for model invocation in Claude settings".into());
         } else if entry.kind == "mcp" && !entry.source.starts_with(".codex/config") && disabled_mcps.contains(&entry.runtime_name) {
@@ -652,8 +657,7 @@ fn add_external_skills(out: &mut Vec<ResourceEntry>, directory: &Path, group: &s
 /// them by path either way.
 fn bridge_skills(entries: &mut [ResourceEntry], source: &str) {
     for entry in entries.iter_mut().filter(|entry| entry.kind == "skill") {
-        let folder = entry.skill_path.as_ref().and_then(|path| path.parent()).and_then(Path::file_name)
-            .map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| entry.runtime_name.clone());
+        let folder = if entry.folder.is_empty() { entry.runtime_name.clone() } else { entry.folder.clone() };
         // A plugin skill may name itself `plugin:skill`; its bridge supplies the prefix.
         let original = entry.skill_path.as_ref().and_then(|path| std::fs::read_to_string(path).ok())
             .and_then(|text| super::skills::parse_frontmatter(&text).name)
