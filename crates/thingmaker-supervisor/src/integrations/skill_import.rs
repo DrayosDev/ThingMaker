@@ -314,9 +314,11 @@ pub fn annotate_collisions(plan: &mut ImportPlan, scope: SkillScope, root: &Path
     for skill in &mut plan.skills {
         skill.collides_with = existing.iter().find(|e| e.scope == scope && e.directory_name == skill.directory_name).map(|e| e.scope);
         let name = skill.frontmatter.name.clone().unwrap_or_else(|| skill.directory_name.clone());
+        // Project and user skills hide one another by name. ThingMaker's own
+        // folder takes no part: its skills reach an agent only when selected.
         skill.shadows_or_shadowed_by = existing
             .iter()
-            .find(|e| e.scope != scope && e.name.clone().unwrap_or_else(|| e.directory_name.clone()) == name)
+            .find(|e| scope != SkillScope::Thingmaker && e.scope != SkillScope::Thingmaker && e.scope != scope && e.name.clone().unwrap_or_else(|| e.directory_name.clone()) == name)
             .map(|e| e.scope);
     }
 }
@@ -505,6 +507,16 @@ mod tests {
         let mut plan2 = stage_import(&source, &temp.path().join("staging2"), "st2").unwrap();
         annotate_collisions(&mut plan2, SkillScope::Project, &root, None);
         assert_eq!(plan2.skills[0].collides_with, Some(SkillScope::Project));
+        // Into ThingMaker's own folder: a project skill of the same name is not
+        // a collision there and nothing shadows anything; its own copy is.
+        let home = temp.path().join("home");
+        annotate_collisions(&mut plan2, SkillScope::Thingmaker, &root, Some(&home));
+        assert_eq!((plan2.skills[0].collides_with, plan2.skills[0].shadows_or_shadowed_by), (None, None));
+        apply_import(&temp.path().join("staging2"), &plan2, &["review".into()], &super::super::member_resources::thingmaker_skills_root(&home), false, &backups).unwrap();
+        annotate_collisions(&mut plan2, SkillScope::Thingmaker, &root, Some(&home));
+        assert_eq!((plan2.skills[0].collides_with, plan2.skills[0].shadows_or_shadowed_by), (Some(SkillScope::Thingmaker), None));
+        annotate_collisions(&mut plan2, SkillScope::Project, &root, Some(&home));
+        assert_eq!(plan2.skills[0].shadows_or_shadowed_by, None, "nor does ThingMaker's copy shadow the project's");
     }
 
     #[test]

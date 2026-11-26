@@ -8,7 +8,7 @@
  * claim about what is "in context" right now.
  */
 import { useEffect, useState, type ReactNode } from "react";
-import type { ContextBundle, ContextSources, Mention, TranscriptUsage } from "@thingmaker/contracts";
+import type { ContextBundle, ContextSources, Mention, SkillEntry, TranscriptUsage } from "@thingmaker/contracts";
 import { PROVIDER_LABELS } from "@thingmaker/contracts";
 import { t } from "../i18n";
 import { api } from "../ipc";
@@ -39,6 +39,10 @@ function around(text: string, name: string, node: ReactNode) {
   );
 }
 
+/** The skills an agent finds on its own. ThingMaker's own folder is read by
+ * no agent: its skills reach one only through a member's selection. */
+export const agentListedSkills = (skills: SkillEntry[]) => skills.filter((skill) => skill.scope !== "thingmaker");
+
 export function ContextPane({ sessionId }: { sessionId: string }) {
   const session = useStore((s) => s.sessions[sessionId]);
   const setError = useStore((s) => s.setError);
@@ -62,6 +66,7 @@ export function ContextPane({ sessionId }: { sessionId: string }) {
   const [usage, setUsage] = useState<TranscriptUsage | null>(null);
   const [usageError, setUsageError] = useState<string | null>(null);
   const [showCalls, setShowCalls] = useState(false);
+  const listable = agentListedSkills(sources?.skills ?? []);
   const agentSessionId = session?.snapshot.agentSessionId ?? null;
   const settledCount = session?.projection.settledTurns ?? 0;
 
@@ -312,11 +317,11 @@ export function ContextPane({ sessionId }: { sessionId: string }) {
               </dd>
               <dt>{t("Skills the agents can list")}</dt>
               <dd>
-                {sources.skills.length === 0 ? (
+                {listable.length === 0 ? (
                   <span className="muted small">{t("none under .agents/skills (project) or ~/.agents/skills (user)")}</span>
                 ) : (
                   <ul className="call-list">
-                    {sources.skills.map((s) => (
+                    {listable.map((s) => (
                       <li className="small" key={s.path}>
                         <strong>{s.name ?? s.directoryName}</strong> <span className="chip small">{s.scope}</span>
                         {s.shadowed && <span className="chip small chip-warn">{t("shadowed by a project skill")}</span>}
