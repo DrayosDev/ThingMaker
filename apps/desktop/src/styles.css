@@ -6283,6 +6283,8 @@ button.odyssey-task-title svg {
 .team-menu-anchor {
   position: relative;
   display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
 }
 
 .team-chip {
@@ -6291,7 +6293,13 @@ button.odyssey-task-title svg {
   gap: 5px;
 }
 
+.team-chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .team-chip svg {
+  flex: none;
   color: var(--muted);
 }
 

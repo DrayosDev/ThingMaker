@@ -193,8 +193,8 @@ export function TeamChip({ sessionId, disabled }: { sessionId: string; disabled:
         title={unset ? t("Work with a team in this session") : t("Team: {summary}", { summary: teamSummary(team) })}
         type="button"
       >
-        {unset ? t("Set team") : t("team: {label}", { label })}
-        {running > 0 ? ` · ${t("{count} working", { count: running })}` : ""}
+        <span className="team-chip-label">{unset ? t("Set team") : t("team: {label}", { label })}</span>
+        {running > 0 && <span>· {t("{count} working", { count: running })}</span>}
         <IconChevron open size={11} />
       </button>
       {open && (
