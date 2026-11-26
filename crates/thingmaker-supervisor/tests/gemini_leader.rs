@@ -246,32 +246,12 @@ fn an_exact_native_model_with_a_thinking_word_in_its_name_is_preserved() {
     assert_eq!(native_model_selection("gemini-4-neon-unknown", &offered), None);
 }
 
-/// One real leader turn; its delegated worker is the deterministic ACP fixture.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "uses one real Gemini conversation on the signed-in default account"]
-async fn a_real_gemini_leader_delegates_and_reads_the_worker_report() {
-    assert_eq!(std::env::var("THINGMAKER_REAL_GEMINI").as_deref(), Ok("1"), "explicitly enable the real provider test");
-    let program = PathBuf::from(std::env::var_os("THINGMAKER_AGY").expect("set the installed agy executable"));
-    let dir = tempfile::tempdir().unwrap();
-    let finished = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let reports = finished.clone();
-    let delegation = Delegation::new(Arc::new(MockWorkers), move |job| {
-        if job.status == JobStatus::Succeeded { reports.lock().unwrap().push(job.clone()); }
-    });
-    let socket = DelegationSocket::bind(delegation.clone(), socket_path(dir.path())).unwrap();
-    let token = delegation.register("real-gemini-lead", Provider::Gemini, dir.path().to_owned(), combo());
-    let mut options = GeminiLaunchOptions::new(dir.path(), &program);
-    options.permission_mode = PermissionStance::AcceptEdits;
-    options.initial_prompt_prefix = Some("Use the session's team MCP tools for this verification. Do not use native subagents, shell, file editing or any other tools.".into());
-    let mut config = SessionActorConfig::new(LaunchTarget::executable(program), AgentLaunch::Gemini(options));
-    config.account_id = Some("default".into());
-    config.mcp_servers.push(server(&socket, &token));
-    config.timeouts.control = Duration::from_secs(45);
-    config.timeouts.turn = Duration::from_secs(180);
-    let actor = SessionActor::open(config).await.expect("real native ACP session opened");
+/// One real turn of a native session, to its settling: the phase, what the
+/// agent said, and the error if it failed.
+async fn real_turn(actor: &SessionActor, request: &str, prompt: &str) -> (TurnPhase, String, Option<String>) {
     let mut events = actor.subscribe();
-    actor.submit_text("real-team-check", "Verify only the connected team tools. Call list_workers, delegate exactly one task to the worker named helper asking it to reply with worker-result, then await_jobs for that task. Reply with the worker's result. Do not create or edit files or use any other tools.").await.unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(180), async {
+    actor.submit_text(request, prompt).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(180), async {
         let mut text = String::new();
         while let Some(event) = events.recv().await {
             match &event.payload {
@@ -285,12 +265,62 @@ async fn a_real_gemini_leader_delegates_and_reads_the_worker_report() {
             }
         }
         panic!("the real provider stream closed before settling");
-    }).await;
+    }).await.expect("the real leader finished within the test budget")
+}
+
+/// A real Gemini session that leads a team, twice over: it opens on native
+/// ACP with the session's own team server, delegates once and settles; then
+/// it is stopped and the same conversation is reopened (`session/load`) with
+/// a new team server, and still knows what its worker reported. Two real
+/// leader turns; the delegated worker is the deterministic ACP fixture.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "uses one real Gemini conversation on the signed-in default account"]
+async fn a_real_gemini_leader_delegates_reads_the_worker_report_and_resumes() {
+    assert_eq!(std::env::var("THINGMAKER_REAL_GEMINI").as_deref(), Ok("1"), "explicitly enable the real provider test");
+    let program = PathBuf::from(std::env::var_os("THINGMAKER_AGY").expect("set the installed agy executable"));
+    let dir = tempfile::tempdir().unwrap();
+    let finished = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let reports = finished.clone();
+    let delegation = Delegation::new(Arc::new(MockWorkers), move |job| {
+        if job.status == JobStatus::Succeeded { reports.lock().unwrap().push(job.clone()); }
+    });
+    let socket = DelegationSocket::bind(delegation.clone(), socket_path(dir.path())).unwrap();
+    let open = |resume: Option<String>| {
+        let token = delegation.register("real-gemini-lead", Provider::Gemini, dir.path().to_owned(), combo());
+        let mut options = GeminiLaunchOptions::new(dir.path(), &program);
+        options.permission_mode = PermissionStance::AcceptEdits;
+        options.effort = Some("low".into());
+        options.resume = resume;
+        options.initial_prompt_prefix = Some("Use the session's team MCP tools for this verification. Do not use native subagents, shell, file editing or any other tools.".into());
+        let mut config = SessionActorConfig::new(LaunchTarget::executable(program.clone()), AgentLaunch::Gemini(options));
+        config.account_id = Some("default".into());
+        config.leads_team = true;
+        config.mcp_servers.push(server(&socket, &token));
+        config.timeouts.control = Duration::from_secs(45);
+        config.timeouts.turn = Duration::from_secs(180);
+        SessionActor::open(config)
+    };
+
+    let actor = open(None).await.expect("real native ACP session opened");
+    let (phase, text, error) = real_turn(&actor, "real-team-check", "Verify only the connected team tools. Call list_workers, delegate exactly one task to the worker named helper asking it to reply with worker-result, then await_jobs for that task. Reply with the worker's result. Do not create or edit files or use any other tools.").await;
+    let conversation = actor.snapshot().await.unwrap().agent_session_id.expect("the conversation is named");
     let _ = actor.stop().await;
     delegation.release("real-gemini-lead").await;
-    let (phase, text, error) = result.expect("real leader finished within the test budget");
-    eprintln!("real leader phase={phase:?}, reply={text:?}, error={error:?}, succeeded workers={}", finished.lock().unwrap().len());
+    eprintln!("real leader phase={phase:?}, reply={text:?}, error={error:?}, succeeded workers={}, conversation={conversation}", finished.lock().unwrap().len());
     assert_eq!(phase, TurnPhase::Succeeded);
     assert!(text.to_lowercase().contains("worker-result"));
     assert_eq!(finished.lock().unwrap().len(), 1, "one real MCP delegation completed");
+
+    // The same conversation, reopened as the application reopens it.
+    let actor = open(Some(conversation.clone())).await.expect("the real conversation was loaded again");
+    let snapshot = actor.snapshot().await.unwrap();
+    assert_eq!(snapshot.agent_session_id.as_deref(), Some(conversation.as_str()), "the conversation asked for, not a new one");
+    assert!(snapshot.leads_team);
+    let (phase, text, error) = real_turn(&actor, "real-resume-check", "Without calling any tool: what exactly did the worker named helper report earlier in this conversation? Reply with that text only.").await;
+    let _ = actor.stop().await;
+    delegation.release("real-gemini-lead").await;
+    eprintln!("resumed leader phase={phase:?}, reply={text:?}, error={error:?}");
+    assert_eq!(phase, TurnPhase::Succeeded);
+    assert!(text.to_lowercase().contains("worker-result"), "the reopened conversation remembers its worker's report");
+    assert_eq!(finished.lock().unwrap().len(), 1, "nothing was delegated again");
 }

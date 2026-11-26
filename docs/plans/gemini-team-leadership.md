@@ -79,6 +79,9 @@ Provider-wide readings are used only for sessions on the corresponding active
 account; another account's own stream is used when available.
 
 The opt-in real-provider test is
-`a_real_gemini_leader_delegates_and_reads_the_worker_report`: it uses one real
-Gemini leader turn and a deterministic simulated worker. It requires
-`THINGMAKER_REAL_GEMINI=1` and `THINGMAKER_AGY`, and is ignored by default.
+`a_real_gemini_leader_delegates_reads_the_worker_report_and_resumes`: one real
+Gemini leader turn with a deterministic simulated worker, then the same
+conversation reopened through `session/load` for a second turn that has to
+remember the worker's report. It requires `THINGMAKER_REAL_GEMINI=1` and
+`THINGMAKER_AGY`, and is ignored by default. `tests/real_continuity.rs` hands a
+conversation to a real Codex leader, which has to fetch a fact from the archive.
