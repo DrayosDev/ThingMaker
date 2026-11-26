@@ -120,8 +120,11 @@ fn candidates(entries: &[ResourceEntry], provider: &str) -> Vec<usize> {
         .map(|(position, _)| position).collect()
 }
 
-/// Walks a unit as an import sees it: skipped names left out, linked
-/// directories not followed (they can loop), linked files followed.
+/// Walks a unit as an import sees it, skipped names left out. Only ordinary
+/// files and folders are copied. A link can point outside the unit, and a
+/// copy that followed it would hand its target on as an ordinary file: to a
+/// local agent too, whose staging refuses linked files for that reason
+/// (`copy_skill_files`). So a unit that holds one is not imported at all.
 fn walk(directory: &Path, relative: &Path, visit: &mut dyn FnMut(&Path, &Path, &std::fs::Metadata) -> std::io::Result<()>) -> std::io::Result<()> {
     let mut entries = std::fs::read_dir(directory)?.collect::<std::io::Result<Vec<_>>>()?;
     entries.sort_by_key(|entry| entry.file_name());
@@ -130,10 +133,13 @@ fn walk(directory: &Path, relative: &Path, visit: &mut dyn FnMut(&Path, &Path, &
         if SKIPPED.iter().any(|skipped| name == *skipped) { continue }
         let path = entry.path();
         let relative = relative.join(&name);
-        if entry.file_type()?.is_dir() {
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
             walk(&path, &relative, visit)?;
-        } else if let Ok(metadata) = std::fs::metadata(&path) && metadata.is_file() {
-            visit(&path, &relative, &metadata)?;
+        } else if kind.is_file() {
+            visit(&path, &relative, &entry.metadata()?)?;
+        } else {
+            return Err(std::io::Error::other(format!("{} is a link or a special file", relative.display())));
         }
     }
     Ok(())
@@ -487,6 +493,43 @@ mod tests {
         std::fs::write(directory.join(super::INDEX), "{ not json").unwrap();
         let rebuilt = import_skills(home, &config, &codex, None, "claude").unwrap();
         assert_eq!(status(&rebuilt, "claude").skills, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nothing_linked_from_outside_a_skill_is_copied() {
+        let temp = tempfile::tempdir().unwrap();
+        let (home, config, codex) = (temp.path(), temp.path().join(".claude"), temp.path().join(".codex"));
+        let skill = |name: &str| format!("---\nname: {name}\ndescription: {name}\n---\n");
+        write(&temp.path().join("private/key.txt"), "not for agents");
+        write(&temp.path().join("private/more/notes.txt"), "nor this");
+        // One skill links a file outside its folder, another a folder.
+        write(&config.join("skills/file-link/SKILL.md"), &skill("file-link"));
+        std::os::unix::fs::symlink(temp.path().join("private/key.txt"), config.join("skills/file-link/key.txt")).unwrap();
+        write(&config.join("skills/folder-link/SKILL.md"), &skill("folder-link"));
+        std::os::unix::fs::symlink(temp.path().join("private/more"), config.join("skills/folder-link/more")).unwrap();
+        // A skill folder that is itself a link is where the person keeps that skill.
+        write(&temp.path().join("kept-elsewhere/shared/SKILL.md"), &skill("shared"));
+        write(&temp.path().join("kept-elsewhere/shared/helper.txt"), "help");
+        std::os::unix::fs::symlink(temp.path().join("kept-elsewhere/shared"), config.join("skills/shared")).unwrap();
+
+        let imported = import_skills(home, &config, &codex, None, "claude").unwrap();
+        let state = status(&imported, "claude");
+        let problem = state.problem.clone().unwrap_or_default();
+        assert!(problem.contains("key.txt is a link") && problem.contains("more is a link"), "{problem}");
+        assert_eq!(state.skills, 1);
+        let source = |id: &str| imported.entries.iter().find(|entry| entry.id == id).unwrap().source.clone();
+        assert_eq!((source("skill:user:file-link").as_str(), source("skill:user:folder-link").as_str()), (".claude/skills", ".claude/skills"), "they stay as the provider has them");
+        assert_eq!(source("skill:user:shared"), "imported-skills/claude");
+        assert_eq!(std::fs::read_to_string(skill_file(&imported, "skill:user:shared").with_file_name("helper.txt")).unwrap(), "help");
+        let copied = tree(&super::root(home));
+        assert!(copied.iter().all(|(path, text)| !text.contains("not for agents") && !text.contains("nor this") && !path.ends_with("key.txt")), "{copied:?}");
+
+        // So a local agent is refused the linked skill exactly as before, and gets the plain one.
+        let local = imported.local_only();
+        let pick = |id: &str| ResourceSelection { skills: vec![id.into()], ..Default::default() };
+        assert!(resolve(&local, &pick("skill:user:file-link"), &Default::default()).is_err());
+        assert!(resolve(&local, &pick("skill:user:shared"), &Default::default()).is_ok());
     }
 
     #[test]
