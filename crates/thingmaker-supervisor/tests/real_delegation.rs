@@ -206,7 +206,10 @@ async fn chat_reopens_the_original_conversation() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     assert!(service.jobs(team).iter().any(|j| j.continues.as_ref()==Some(&keeper.id) && j.agent_session_id.as_ref()==Some(&original)));
-    let jobs = service.await_jobs(team, &[], Duration::from_secs(60), false).await.unwrap();
-    assert!(jobs.iter().all(|j| j.status == JobStatus::Succeeded), "{jobs:?}");
+    // By id: the jobs the messages started are not among those awaited by default.
+    let ids: Vec<String> = service.jobs(team).into_iter().map(|job| job.id).collect();
+    let jobs = service.await_jobs(team, &ids, Duration::from_secs(60), false).await.unwrap();
+    assert!(jobs.len() >= 3 && jobs.iter().all(|j| j.status == JobStatus::Succeeded), "{jobs:?}");
+    assert!(jobs.iter().any(|j| j.chat), "the reply was a job a message started: {jobs:?}");
     service.release(team).await;
 }

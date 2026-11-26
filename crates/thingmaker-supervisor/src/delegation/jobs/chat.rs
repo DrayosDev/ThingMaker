@@ -113,6 +113,9 @@ pub struct ChatView {
     pub message_limit: usize,
 }
 
+/// Who hears the chats' events.
+pub(super) type ChatListener = Arc<dyn Fn(ChatEvent) + Send + Sync>;
+
 /// Something the host is told about a chat, as it happens.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
@@ -327,7 +330,7 @@ impl Delegation {
             let mut state = self.state();
             let worker = |id: &str| state.jobs.get(id).filter(|job| job.view.orchestrator == session);
             let (lead, open) = state.orchestrators.get(session).map(|team| (team.provider, team.combo.agent_chat)).ok_or("Session ended.")?;
-            let (from, from_name): (String, String) = match caller {
+            let (from, from_name) = match caller {
                 Caller::Orchestrator { .. } => (LEAD.to_string(), "Orchestrator".into()),
                 Caller::Worker { job_id, .. } => {
                     let job = worker(job_id).ok_or("Unknown sender.")?;
@@ -635,6 +638,16 @@ impl Delegation {
     }
 }
 
+/// What a message given up for want of its recipient says.
+fn expired(message: &Message, expiry: Duration) -> String {
+    let waited = match expiry.as_secs() {
+        seconds if seconds >= 120 => format!("{} minutes", seconds / 60),
+        seconds if seconds > 1 => format!("{seconds} seconds"),
+        _ => "a second".to_string(),
+    };
+    format!("{} did not take the message within {waited}: it was busy and could not be interrupted, or was waiting out a limit. It was not delivered.", message.to_name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -668,14 +681,4 @@ mod tests {
         assert!(stored.contains("\"fromProvider\":\"codex\""), "{stored}");
         assert_eq!(serde_json::from_str::<Receipt>(&stored).unwrap(), message.receipt());
     }
-}
-
-/// What a message given up for want of its recipient says.
-fn expired(message: &Message, expiry: Duration) -> String {
-    let waited = match expiry.as_secs() {
-        seconds if seconds >= 120 => format!("{} minutes", seconds / 60),
-        seconds if seconds > 1 => format!("{seconds} seconds"),
-        _ => "a second".to_string(),
-    };
-    format!("{} did not take the message within {waited}: it was busy and could not be interrupted, or was waiting out a limit. It was not delivered.", message.to_name)
 }

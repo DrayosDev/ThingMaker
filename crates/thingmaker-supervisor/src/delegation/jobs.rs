@@ -387,7 +387,7 @@ struct Inner {
     /// time; two side by side would each crawl.
     local_gate: Arc<tokio::sync::Semaphore>,
     /// Who hears what happens in the sessions' chats.
-    chat_listener: std::sync::RwLock<Option<Arc<dyn Fn(chat::ChatEvent) + Send + Sync>>>,
+    chat_listener: std::sync::RwLock<Option<chat::ChatListener>>,
     /// How long a chat message waits for its recipient.
     chat_expiry: Mutex<Duration>,
 }
