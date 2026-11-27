@@ -5515,14 +5515,14 @@ dependencies = [
 
 [[package]]
 name = "thingmaker-appcontainer"
-version = "1.5.0"
+version = "2.0.0"
 dependencies = [
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "thingmaker-desktop"
-version = "1.5.0"
+version = "2.0.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -5569,7 +5569,7 @@ dependencies = [
 
 [[package]]
 name = "thingmaker-supervisor"
-version = "1.5.0"
+version = "2.0.0"
 dependencies = [
  "blake3",
  "ignore",
@@ -5600,7 +5600,7 @@ dependencies = [
 
 [[package]]
 name = "thingmaker-voice"
-version = "1.5.0"
+version = "2.0.0"
 dependencies = [
  "bzip2 0.6.1",
  "cpal",
