@@ -56,7 +56,7 @@ for line in sys.stdin:
     let dependency = &found.entries.iter().find(|entry| entry.id == selected_skill).unwrap().mcp_dependencies[0];
     assert!(dependency.required);
     assert_eq!(dependency.mcp_ids, ["mcp:project:selected"]);
-    let mut selection = ResourceSelection { skills:vec![selected_skill.into()],mcps:vec![] };
+    let mut selection = ResourceSelection { skills:vec![selected_skill.into()],mcps:vec![], ..Default::default() };
     assert!(member_resources::resolve(&found, &selection, &HashMap::new()).is_err(), "required MCP is not silently auto-enabled");
     selection.mcps = dependency.mcp_ids.clone();
     let resolved = member_resources::resolve(&found, &selection, &HashMap::new()).unwrap();

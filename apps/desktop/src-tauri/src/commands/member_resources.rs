@@ -16,13 +16,37 @@ pub struct CatalogView {
     problem: Option<String>,
 }
 
-fn catalog_for(state: &AppState, root: Option<&Path>) -> CommandResult<ResourceCatalog> {
+/// Skills shipped inside ThingMaker, installed in its own skills folder so
+/// every agent's selector offers them.
+const BUNDLED_SKILLS: [(&str, &str); 1] = [("big-thing", super::odyssey::SKILL_MD)];
+
+/// Once, when the application starts: listing resources never writes. A
+/// skill the person edited or removed there is left as they left it.
+pub fn install_bundled_skills(home: Option<&Path>) {
+    let Some(home) = home else { return };
+    if let Err(error) = member_resources::install_bundled_skills(&member_resources::thingmaker_skills_root(home), &BUNDLED_SKILLS) {
+        tracing::warn!(%error, "ThingMaker's own skills could not be installed");
+    }
+}
+
+/// The person's home and the folders of the Claude and Codex accounts in use.
+fn homes(state: &AppState) -> CommandResult<(PathBuf, PathBuf, PathBuf)> {
     let home = state.home.as_deref().ok_or_else(|| DesktopError::not_ready("HOME is not set"))?;
     let folder = state.try_account_folder(Provider::Claude, None)?.or_else(|| accounts::main_folder(Provider::Claude, home))
         .ok_or_else(|| DesktopError::not_ready("Claude account folder is unavailable"))?;
     let codex_folder = state.try_account_folder(Provider::Codex, None)?.or_else(|| accounts::main_folder(Provider::Codex, home))
         .ok_or_else(|| DesktopError::not_ready("Codex account folder is unavailable"))?;
-    member_resources::catalog_with_homes(home, &folder, &codex_folder, root)
+    Ok((home.to_path_buf(), folder, codex_folder))
+}
+
+fn workspace_root(state: &AppState, workspace_id: Option<String>) -> CommandResult<Option<PathBuf>> {
+    workspace_id.map(|id| state.with_storage(|s| s.workspace_get(&id)).map_err(storage_error)?
+        .map(|record| PathBuf::from(record.canonical_root)).ok_or_else(|| DesktopError::not_ready("Workspace not found"))).transpose()
+}
+
+fn catalog_for(state: &AppState, root: Option<&Path>) -> CommandResult<ResourceCatalog> {
+    let (home, folder, codex_folder) = homes(state)?;
+    member_resources::catalog_with_homes(&home, &folder, &codex_folder, root)
 }
 
 fn check_harness(state: &AppState, provider: Provider) -> CommandResult<()> {
@@ -63,8 +87,7 @@ fn local_catalog(state: &AppState, catalog: ResourceCatalog, root: Option<&Path>
 #[tauri::command]
 pub fn member_resources_catalog(workspace_id: Option<String>, provider: Provider, local: Option<bool>, state: State<'_, AppState>) -> CommandResult<CatalogView> {
     if !matches!(provider, Provider::Claude | Provider::Codex) { return Err(DesktopError::unsupported("Member resources require Claude Code or Codex")) }
-    let root = workspace_id.map(|id| state.with_storage(|s| s.workspace_get(&id)).map_err(storage_error)?
-        .map(|record| PathBuf::from(record.canonical_root)).ok_or_else(|| DesktopError::not_ready("Workspace not found"))).transpose()?;
+    let root = workspace_root(&state, workspace_id)?;
     let catalog = catalog_for(&state, root.as_deref())?.for_provider(provider);
     let local = local.unwrap_or(false);
     let catalog = if local {
@@ -72,6 +95,21 @@ pub fn member_resources_catalog(workspace_id: Option<String>, provider: Provider
         local_catalog(&state, catalog, root.as_deref(), provider, &env)
     } else { catalog };
     Ok(CatalogView { catalog, problem: check_harness(&state, provider).err().map(|error| error.message) })
+}
+
+/// Copies a provider's skills into ~/.thingmaker/imported-skills, or brings
+/// those copies up to date. Only this writes them: listing the catalog and
+/// starting a member read what the last import left. The workspace adds the
+/// plugins installed for that project; copies made for other projects and
+/// accounts stay. Off the main thread: a first import copies whole plugins.
+#[tauri::command]
+pub async fn imported_skills_setup(provider: String, workspace_id: Option<String>, state: State<'_, AppState>) -> CommandResult<member_resources::ImportStatus> {
+    let (home, folder, codex_folder) = homes(&state)?;
+    let root = workspace_root(&state, workspace_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        member_resources::import_skills(&home, &folder, &codex_folder, root.as_deref(), &provider)?.imports.into_iter().find(|status| status.provider == provider)
+            .ok_or_else(|| DesktopError::unsupported("Skills cannot be imported from this provider"))
+    }).await.map_err(|error| DesktopError::io(format!("The import did not finish: {error}")))?
 }
 
 pub fn resolve(state: &AppState, root: &Path, slot: &WorkerSlot) -> CommandResult<Option<ResolvedResources>> {
@@ -96,4 +134,17 @@ pub fn resolve_for(state: &AppState, root: &Path, provider: Provider, model: Opt
         return Err(DesktopError::conflict("A selected server uses ThingMaker's reserved team-server name"));
     }
     Ok(Some(resolved))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn importing_skills_has_one_name_everywhere_and_none_on_the_phone() {
+        let name = "imported_skills_setup";
+        // The renderer calls the name the contracts give it, and the host registers that command.
+        assert!(include_str!("../../../../../packages/contracts/src/index.ts").contains(&format!("importedSkillsSetup: \"{name}\"")));
+        assert!(include_str!("../lib.rs").contains(&format!("commands::member_resources::{name},")));
+        // It copies files into the person's home: a paired phone cannot ask for it.
+        assert!(!crate::remote::dispatch::ALLOWED.contains(&name));
+    }
 }

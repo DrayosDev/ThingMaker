@@ -24,7 +24,7 @@ use crate::state::AppState;
 
 /// The protocol the briefing points the model at. Kept next to the code that
 /// implements it, and gated by `odysseySkill.test.ts` against drifting from it.
-const SKILL_MD: &str = include_str!("../../../../../runtime/skills/big-thing/SKILL.md");
+pub(crate) const SKILL_MD: &str = include_str!("../../../../../runtime/skills/big-thing/SKILL.md");
 
 /// The delegate a Claude orchestrator raises
 /// (docs/plans/odyssey.md §12.9).

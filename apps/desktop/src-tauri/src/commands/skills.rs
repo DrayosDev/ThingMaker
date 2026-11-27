@@ -84,6 +84,7 @@ pub(crate) fn resolve_target(state: &AppState, target: &ConfigTarget) -> Command
                     workspace_root(state, id)?.join(".agents/skills")
                 }
                 SkillScope::User => home(state)?.join(".agents/skills"),
+                SkillScope::Thingmaker => thingmaker_supervisor::integrations::member_resources::thingmaker_skills_root(&home(state)?),
             };
             Ok((base.join(directory_name).join("SKILL.md"), "markdown"))
         }
@@ -239,6 +240,10 @@ fn skills_root_for(state: &AppState, scope: SkillScope, workspace_id: Option<&st
             let home = home(state)?;
             Ok((home.join(".agents/skills"), home))
         }
+        SkillScope::Thingmaker => {
+            let home = home(state)?;
+            Ok((thingmaker_supervisor::integrations::member_resources::thingmaker_skills_root(&home), home))
+        }
     }
 }
 
@@ -254,7 +259,7 @@ fn stage_and_annotate(state: &AppState, source: &Path, scope: SkillScope, worksp
     };
     let root = match scope {
         SkillScope::Project => workspace_id.map(|id| workspace_root(state, id)).transpose()?.unwrap_or_else(|| PathBuf::from("/nonexistent")),
-        SkillScope::User => PathBuf::from("/nonexistent"),
+        SkillScope::User | SkillScope::Thingmaker => PathBuf::from("/nonexistent"),
     };
     annotate_collisions(&mut plan, scope, &root, state.home.as_deref());
     let cache = serde_json::to_vec(&plan).map_err(|e| DesktopError::io(e.to_string()))?;
@@ -326,7 +331,7 @@ pub fn skill_import_annotate(request: SkillImportAnnotateRequest, state: State<'
     };
     let root = match request.scope {
         SkillScope::Project => request.workspace_id.as_deref().map(|id| workspace_root(&state, id)).transpose()?.unwrap_or_else(|| PathBuf::from("/nonexistent")),
-        SkillScope::User => PathBuf::from("/nonexistent"),
+        SkillScope::User | SkillScope::Thingmaker => PathBuf::from("/nonexistent"),
     };
     annotate_collisions(&mut plan, request.scope, &root, state.home.as_deref());
     Ok(plan)
@@ -370,6 +375,7 @@ pub(crate) fn skill_backup_root(state: &AppState, scope: SkillScope) -> PathBuf 
     state.data_dir.join("skill-backups").join(match scope {
         SkillScope::Project => "project",
         SkillScope::User => "user",
+        SkillScope::Thingmaker => "thingmaker",
     })
 }
 

@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import type { MemberResourceCatalog, WorkerSlot } from "@thingmaker/contracts";
+import type { MemberResourceCatalog, MemberResourceEntry, WorkerSlot } from "@thingmaker/contracts";
 
-vi.mock("./ipc", () => ({ api: { memberResources: vi.fn() } }));
+vi.mock("./ipc", () => ({ api: { memberResources: vi.fn(), importedSkillsSetup: vi.fn() } }));
 import { api } from "./ipc";
 import { MemberResources } from "./components/MemberResources";
 import { useStore } from "./store";
@@ -165,4 +165,107 @@ it("points a missing connection to Settings › Integrations", async () => {
   const dependencies = await screen.findByRole("region", { name: "Connections for selected skills" });
   fireEvent.click(within(dependencies).getByRole("button", { name: "Open integration configuration" }));
   expect(useStore.getState().view).toEqual({ kind: "settings", tab: "integrations" });
+});
+
+const skill = (name: string, skillDependencies: string[] = [], available = true): MemberResourceEntry =>
+  ({ id: `skill:user:${name}`, name, kind: "skill", description: name, group: "user", available, problem: null, skillDependencies });
+const box = (name: string) => screen.getByRole("checkbox", { name }) as HTMLInputElement;
+
+it("loads what the ticked skills refer to only when asked, says why, and lets each one be left out", async () => {
+  vi.mocked(api.memberResources).mockResolvedValue({ ...catalog, entries: [
+    skill("plan", ["skill:user:write", "skill:user:off"]), skill("write", ["skill:user:spell"]), skill("spell"), skill("off", [], false),
+  ] });
+  const saved = { skills: ["skill:user:plan"], mcps: [] };
+  render(<Editor worker={{ ...initial, resources: saved }} />);
+  await screen.findByRole("checkbox", { name: "plan" });
+  // A team saved before references existed: they are shown, and nothing is added.
+  expect(screen.getByText("Uses write, off")).toBeTruthy();
+  expect(box("write").checked || box("spell").checked).toBe(false);
+  expect(screen.getByRole("button", { name: /Skills · 1/ })).toBeTruthy();
+  const ask = screen.getByRole("checkbox", { name: /Also load the skills that the selected ones refer to/ }) as HTMLInputElement;
+  expect(ask.checked).toBe(false);
+  expect(latest.resources).toEqual(saved);
+
+  fireEvent.click(ask);
+  expect(latest.resources).toEqual({ ...saved, referencedSkills: true });
+  expect(box("write").checked && !box("write").disabled).toBe(true);
+  expect(box("spell").checked, "followed through").toBe(true);
+  expect(screen.getAllByText(/^Included by plan/)).toHaveLength(2);
+  expect(box("off").checked, "an unavailable skill is not included").toBe(false);
+  expect(screen.getByRole("button", { name: /Skills · 3/ })).toBeTruthy();
+
+  // Left out: neither it nor what only it led to, and the list still says who refers to it.
+  fireEvent.click(box("write"));
+  expect(latest.resources).toEqual({ ...saved, referencedSkills: true, excludedSkills: ["skill:user:write"] });
+  expect(box("write").checked || box("spell").checked).toBe(false);
+  expect(screen.getByText(/^Left out\. plan refers to it\./)).toBeTruthy();
+  expect(screen.getByRole("button", { name: /Skills · 1/ })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Include again" }));
+  expect(latest.resources).toEqual({ ...saved, referencedSkills: true });
+  fireEvent.click(screen.getAllByRole("button", { name: "Leave out" })[0]!);
+  expect(latest.resources?.excludedSkills).toHaveLength(1);
+  // Ticking a left-out skill makes it the person's own pick.
+  fireEvent.click(screen.getByRole("button", { name: "Include again" }));
+  fireEvent.click(box("spell"));
+  expect(latest.resources).toEqual({ ...saved, referencedSkills: true, excludedSkills: ["skill:user:spell"] });
+  fireEvent.click(box("spell"));
+  expect(latest.resources).toEqual({ skills: ["skill:user:plan", "skill:user:spell"], mcps: [], referencedSkills: true });
+
+  // Turned off again, the selection is stored without a trace of it.
+  fireEvent.click(box("spell"));
+  fireEvent.click(ask);
+  expect(latest.resources).toEqual(saved);
+});
+
+it("drops dependencies with their explicit skill unless another pick still needs them", async () => {
+  vi.mocked(api.memberResources).mockResolvedValue({ ...catalog, entries: [
+    skill("plan", ["skill:user:write", "skill:user:spell"]), skill("review", ["skill:user:spell"]), skill("write"), skill("spell"),
+  ] });
+  render(<Editor worker={{ ...initial, resources: { skills: ["skill:user:plan", "skill:user:review"], mcps: [], referencedSkills: true } }} />);
+  await screen.findByRole("checkbox", { name: "plan" });
+  expect(screen.getByText(/^Included by plan, review/)).toBeTruthy();
+  fireEvent.click(box("plan"));
+  expect(latest.resources?.skills).toEqual(["skill:user:review"]);
+  expect(box("write").checked || box("write").disabled).toBe(false);
+  expect(box("spell").checked, "still needed by review").toBe(true);
+  expect(screen.getByText(/^Included by review/)).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Keep selected" }));
+  expect(latest.resources?.skills).toEqual(["skill:user:review", "skill:user:spell"]);
+  fireEvent.click(box("review"));
+  expect(box("spell").checked && !box("spell").disabled, "a skill the person ticked survives").toBe(true);
+  fireEvent.click(screen.getByRole("button", { name: "Select group" }));
+  expect(latest.resources?.skills).toEqual(["skill:user:spell", "skill:user:plan", "skill:user:review", "skill:user:write"]);
+  fireEvent.click(screen.getByRole("button", { name: "Deselect group" }));
+  expect(latest.resources?.skills).toEqual([]);
+});
+
+it("sets up a provider's imported skills and reloads the catalog", async () => {
+  vi.mocked(api.memberResources).mockResolvedValue({ ...catalog, imports: [
+    { provider: "claude", imported: false, skills: 0, outdated: 0, syncedAt: null, problem: null },
+    { provider: "codex", imported: true, skills: 4, outdated: 2, syncedAt: 1_700_000_000_000, problem: "2 skills could not be copied" },
+  ] });
+  vi.mocked(api.importedSkillsSetup).mockReset().mockResolvedValue({ provider: "claude", imported: true, skills: 3, outdated: 0, syncedAt: 1_700_000_000_000, problem: null });
+  render(<Editor worker={{ ...initial, resources: { skills: [], mcps: [] } }} />);
+  const claude = await screen.findByRole("group", { name: "Claude Code" });
+  const codex = screen.getByRole("group", { name: "Codex" });
+  expect(within(claude).getByText("Not set up")).toBeTruthy();
+  expect(within(codex).getByText(/4 skills imported/)).toBeTruthy();
+  expect(within(codex).getByText("2 changed since then"), "listing never copies: it says what an import would bring").toBeTruthy();
+  expect(within(codex).getByRole("alert").textContent).toBe("2 skills could not be copied");
+  expect(within(screen.getByRole("group", { name: "Gemini" })).getByRole("button", { name: "Set up" })).toBeTruthy();
+  expect(api.memberResources).toHaveBeenCalledTimes(1);
+  fireEvent.click(within(claude).getByRole("button", { name: "Set up" }));
+  expect(api.importedSkillsSetup).toHaveBeenCalledWith("claude", null);
+  await waitFor(() => expect(api.memberResources).toHaveBeenCalledTimes(2));
+  expect(within(await screen.findByRole("group", { name: "Codex" })).getByRole("button", { name: "Import again" })).toBeTruthy();
+});
+
+it("reports a failed import on its provider", async () => {
+  vi.mocked(api.memberResources).mockResolvedValue({ ...catalog, imports: [] });
+  vi.mocked(api.importedSkillsSetup).mockReset().mockRejectedValue({ message: "Gemini is not installed" });
+  render(<Editor worker={{ ...initial, resources: { skills: [], mcps: [] } }} />);
+  const gemini = await screen.findByRole("group", { name: "Gemini" });
+  fireEvent.click(within(gemini).getByRole("button", { name: "Set up" }));
+  expect((await within(gemini).findByRole("alert")).textContent).toBe("Gemini is not installed");
+  expect(api.memberResources).toHaveBeenCalledTimes(1);
 });

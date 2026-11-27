@@ -72,6 +72,8 @@ import {
   type McpOverview,
   type MemberResourceCatalog,
   type MemberResourceSelection,
+  type ImportedSkillsProvider,
+  type ImportedSkillsStatus,
   type McpProbe,
   type McpScope,
   type McpServerSpec,
@@ -302,6 +304,8 @@ export const api = {
     call<RemovedSkill>(COMMANDS.skillRemove, { request: { scope, workspaceId, directoryName, keepBackup } }),
   mcpOverview: (workspaceId: string | null) => call<McpOverview>(COMMANDS.mcpOverview, { workspaceId }),
   memberResources: (workspaceId: string | null, provider: Provider, local = false) => call<MemberResourceCatalog>(COMMANDS.memberResources, { workspaceId, provider, local }),
+  /** Copies every skill the provider has into ThingMaker's imported-skills folder, or brings the copies up to date; reload the catalog afterwards. */
+  importedSkillsSetup: (provider: ImportedSkillsProvider, workspaceId: string | null) => call<ImportedSkillsStatus>(COMMANDS.importedSkillsSetup, { provider, workspaceId }),
   mcpCatalog: () => call<McpCatalogEntry[]>(COMMANDS.mcpCatalog),
   mcpParse: (text: string, name?: string) => call<McpServerSpec[]>(COMMANDS.mcpParse, { request: { text, name: name ?? null } }),
   mcpInstall: (workspaceId: string | null, spec: McpServerSpec, providers: Provider[], scope: McpScope) =>

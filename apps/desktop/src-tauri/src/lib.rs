@@ -129,6 +129,7 @@ pub fn run() {
             let resource_dir = app.path().resource_dir().ok();
             let state = state::AppState::initialize(&data_dir, resource_dir.as_deref())
                 .map_err(|error| format!("could not initialize desktop state: {error}"))?;
+            commands::member_resources::install_bundled_skills(state.home.as_deref());
             app.manage(std::sync::Arc::new(thingmaker_voice::Service::new(&data_dir)));
             app.manage(state);
             app.manage(commands::screen_stream::ScreenStreams::default());
@@ -291,6 +292,7 @@ pub fn run() {
             commands::terminal::save_text_file,
             commands::skills::context_sources_for_workspace,
             commands::member_resources::member_resources_catalog,
+            commands::member_resources::imported_skills_setup,
             commands::skills::config_read_file,
             commands::skills::config_write_file,
             commands::skills::skill_create,

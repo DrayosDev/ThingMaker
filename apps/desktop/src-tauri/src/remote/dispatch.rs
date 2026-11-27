@@ -335,7 +335,7 @@ mod tests {
             assert!(source.contains(&format!("\"{command}\" =>")), "{command} is allowed but not routed");
         }
         assert!(!ALLOWED.iter().any(|command| command.starts_with("voice_")), "microphone and dictation must stay desktop-only");
-        for denied in ["continuity_save", "continuity_attach", "continuity_read", "account_set_active", "accounts_list", "workspace_trust", "terminal_open", "terminal_write", "git_push", "git_commit", "file_write_checked", "provider_login_start", "provider_logout", "runtime_env_set", "mcp_install", "settings_set", "odyssey_delete", "bigthing_rollback", "cleanup_run", "open_external", "app_quit", "config_write_file", "skill_create"] {
+        for denied in ["continuity_save", "continuity_attach", "continuity_read", "account_set_active", "accounts_list", "workspace_trust", "terminal_open", "terminal_write", "git_push", "git_commit", "file_write_checked", "provider_login_start", "provider_logout", "runtime_env_set", "mcp_install", "settings_set", "odyssey_delete", "bigthing_rollback", "cleanup_run", "open_external", "app_quit", "config_write_file", "skill_create", "imported_skills_setup"] {
             assert!(!ALLOWED.contains(&denied), "{denied} must not be reachable from a phone");
         }
     }

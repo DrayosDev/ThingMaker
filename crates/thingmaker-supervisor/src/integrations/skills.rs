@@ -19,6 +19,9 @@ use serde::{Deserialize, Serialize};
 pub enum SkillScope {
     Project,
     User,
+    /// ThingMaker's own skills (`~/.thingmaker/skills`): no agent reads them
+    /// natively; the member selector offers them to every agent.
+    Thingmaker,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,11 +182,12 @@ pub fn user_skills_root(home: &Path) -> PathBuf {
     home.join(".agents").join("skills")
 }
 
-/// Discovers project and user skills and marks same-name collisions.
+/// Discovers project, user and ThingMaker skills and marks same-name collisions.
 pub fn discover_skills(root: &Path, home: Option<&Path>) -> Vec<SkillEntry> {
     let mut skills = scan_root(&project_skills_root(root), SkillScope::Project);
     if let Some(home) = home {
         skills.extend(scan_root(&user_skills_root(home), SkillScope::User));
+        skills.extend(scan_root(&super::member_resources::thingmaker_skills_root(home), SkillScope::Thingmaker));
     }
     let names: Vec<(String, SkillScope)> = skills
         .iter()
@@ -191,13 +195,17 @@ pub fn discover_skills(root: &Path, home: Option<&Path>) -> Vec<SkillEntry> {
         .collect();
     for skill in &mut skills {
         let name = skill.name.clone().unwrap_or_else(|| skill.directory_name.clone());
-        let others: Vec<SkillScope> = names.iter().filter(|(n, scope)| *n == name && *scope != skill.scope).map(|(_, s)| *s).collect();
+        // A ThingMaker skill hides nothing and is hidden by nothing: no agent
+        // reads that folder itself.
+        let others: Vec<SkillScope> = names.iter().filter(|(n, scope)| *n == name && *scope != skill.scope && *scope != SkillScope::Thingmaker).map(|(_, s)| *s).collect();
         if others.is_empty() {
             continue;
         }
         match skill.scope {
             SkillScope::Project => skill.shadows = Some(SkillScope::User),
             SkillScope::User => skill.shadowed = others.contains(&SkillScope::Project),
+            // Reached only through the selector, where both stay selectable.
+            SkillScope::Thingmaker => {}
         }
     }
     skills
@@ -242,5 +250,20 @@ mod tests {
         let docs = skills.iter().find(|s| s.directory_name == "docs").unwrap();
         assert!(!docs.shadowed);
         assert_eq!(docs.resources, vec!["reference.md"]);
+    }
+
+    #[test]
+    fn a_thingmaker_skill_neither_shadows_nor_is_shadowed() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project");
+        let home = temp.path().join("home");
+        // The same name in the project and in ThingMaker's own folder, and in the user's and ThingMaker's.
+        for (folder, name) in [(root.join(".agents/skills"), "plan"), (home.join(".thingmaker/skills"), "plan"), (home.join(".agents/skills"), "notes"), (home.join(".thingmaker/skills"), "notes")] {
+            std::fs::create_dir_all(folder.join(name)).unwrap();
+            std::fs::write(folder.join(name).join("SKILL.md"), format!("---\nname: {name}\ndescription: d\n---\n")).unwrap();
+        }
+        let skills = discover_skills(&root, Some(&home));
+        assert_eq!(skills.iter().filter(|s| s.scope == SkillScope::Thingmaker).count(), 2);
+        assert!(skills.iter().all(|s| s.shadows.is_none() && !s.shadowed), "{skills:?}");
     }
 }

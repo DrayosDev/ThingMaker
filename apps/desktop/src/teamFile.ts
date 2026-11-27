@@ -10,6 +10,7 @@
  */
 import { DEFAULT_AGENT_CHAT, PROVIDERS, type Combo, type OrchestratorChoice, type Provider, type TeamPreset, type WorkerSlot } from "@thingmaker/contracts";
 import { t } from "./i18n";
+import { storedSelection } from "./memberResourceDependencies";
 import { newPreset, uniqueName, type HelperPreset } from "./team";
 
 export const TEAMS_FORMAT = "thingmaker.teams";
@@ -53,11 +54,14 @@ const text = (value: unknown): string | undefined => (typeof value === "string" 
 
 function readSelection(resources: WorkerSlot["resources"]) {
   if (resources !== undefined && (resources === null || typeof resources !== "object" || !Array.isArray(resources.skills) || !Array.isArray(resources.mcps)
-    || Object.keys(resources).some((key) => key !== "skills" && key !== "mcps")
-    || [...resources.skills, ...resources.mcps].some((id) => typeof id !== "string" || !id.trim()))) {
+    || Object.keys(resources).some((key) => key !== "skills" && key !== "mcps" && key !== "referencedSkills" && key !== "excludedSkills")
+    || (resources.referencedSkills !== undefined && typeof resources.referencedSkills !== "boolean")
+    || (resources.excludedSkills !== undefined && !Array.isArray(resources.excludedSkills))
+    || [...resources.skills, ...resources.mcps, ...(resources.excludedSkills ?? [])].some((id) => typeof id !== "string" || !id.trim()))) {
     throw new Error(t("Invalid member resource selection."));
   }
-  return resources ? { resources: { skills: [...new Set(resources.skills)], mcps: [...new Set(resources.mcps)] } } : {};
+  // A team that does not ask for referenced skills is written and read as before they existed.
+  return resources ? { resources: storedSelection({ ...resources, skills: [...new Set(resources.skills)], mcps: [...new Set(resources.mcps)] }) } : {};
 }
 
 function readLead(value: unknown, where: string): OrchestratorChoice {

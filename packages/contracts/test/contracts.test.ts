@@ -12,6 +12,11 @@ describe("contracts", () => {
     expect(names.every((name) => /^[a-z_]+$/.test(name))).toBe(true);
   });
 
+  it("names the command that imports a provider's skills", () => {
+    // The host registers it under this name; the phone's allow-list leaves it out.
+    expect(COMMANDS.importedSkillsSetup).toBe("imported_skills_setup");
+  });
+
   it("labels every provider", () => {
     expect(PROVIDERS).toEqual(["claude", "codex", "gemini", "local"]);
     for (const provider of PROVIDERS) expect(PROVIDER_LABELS[provider]).toBeTruthy();

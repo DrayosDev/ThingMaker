@@ -185,7 +185,7 @@ mod tests {
         assert_eq!(figma.mcp_ids, ["mcp:user:figma"]);
         assert!(!entry.mcp_dependencies.iter().find(|dependency| dependency.name == "optional-service").unwrap().required);
         assert!(!serde_json::to_string(&found).unwrap().contains("private-marker"));
-        let chosen = ResourceSelection { skills: vec![entry.id.clone()], mcps: vec![] };
+        let chosen = ResourceSelection { skills: vec![entry.id.clone()], mcps: vec![], ..Default::default() };
         assert!(resolve(&found, &chosen, &HashMap::new()).err().unwrap().message.contains("requires MCP"));
         let complete = ResourceSelection { mcps: vec!["mcp:user:figma".into(), "mcp:user:gitnexus".into()], ..chosen };
         assert!(resolve(&found, &complete, &HashMap::new()).is_ok());
@@ -222,7 +222,7 @@ mod tests {
         let home = temp.path();
         let directory = home.join(".codex/skills/art");
         write(&directory.join("SKILL.md"), "---\nname: art\ndescription: Draw\n---\nUse mcp__paint__draw.\n");
-        let selected = ResourceSelection { skills: vec!["skill:codex-user:art".into()], mcps: vec![] };
+        let selected = ResourceSelection { skills: vec!["skill:codex-user:art".into()], mcps: vec![], ..Default::default() };
         let first = catalog(home, &home.join(".claude"), None).unwrap();
         let before = resolve(&first, &selected, &HashMap::new()).unwrap();
         write(&directory.join("agents/openai.yaml"), "dependencies:\n  tools:\n    - type: mcp\n      value: paint\n");

@@ -24,7 +24,14 @@ import { Fold, FoldItem, Select, SettingGroup, SettingRow } from "./settings/con
 const CodeEditor = lazy(() => import("./MonacoEditor"));
 
 /** A skill scope as the person reads it. */
-const scopeLabel = (scope: SkillScope) => (scope === "project" ? t("project") : t("user"));
+const scopeLabel = (scope: SkillScope) => (scope === "project" ? t("project") : scope === "thingmaker" ? "ThingMaker" : t("user"));
+
+/** Where a skill lives as the person reads it, on a chip or in the scope choice. */
+const scopeChip = (scope: SkillScope) => (scope === "project" ? t("This project") : scope === "thingmaker" ? "ThingMaker" : t("Every project"));
+
+/** The file a skill's editor opens; only project skills belong to a workspace. */
+const skillTarget = (scope: SkillScope, workspaceId: string | null, directoryName: string): ConfigTarget =>
+  ({ kind: "skill", scope, workspaceId: scope === "project" ? workspaceId : null, directoryName });
 
 /** Which provider reads which instruction file, and why both exist. */
 const INSTRUCTION_FILES: { file: InstructionFileName; readBy: string }[] = [
@@ -158,7 +165,7 @@ export function IntegrationsSettings() {
     api
       .skillCreate(newSkill.scope, owner, name)
       .then(() => {
-        setEditor({ target: { kind: "skill", scope: newSkill.scope, workspaceId: owner, directoryName: name }, title: `SKILL.md (${newSkill.scope}/${name})` });
+        setEditor({ target: skillTarget(newSkill.scope, owner, name), title: `SKILL.md (${newSkill.scope}/${name})` });
         setNewSkill(null);
         void reload();
       })
@@ -237,7 +244,7 @@ export function IntegrationsSettings() {
                     className="set-link"
                     onClick={() =>
                       setEditor({
-                        target: { kind: "skill", scope: skill.scope, workspaceId: skill.scope === "project" ? workspaceId : null, directoryName: skill.directoryName },
+                        target: skillTarget(skill.scope, workspaceId, skill.directoryName),
                         title: `SKILL.md (${skill.scope}/${skill.directoryName})`,
                       })
                     }
@@ -262,7 +269,7 @@ export function IntegrationsSettings() {
               <span className="set-item-text" title={skill.description ?? undefined}>
                 {skill.name ?? skill.directoryName}
               </span>
-              <span className="set-chip">{skill.scope === "project" ? t("This project") : t("Every project")}</span>
+              <span className="set-chip">{scopeChip(skill.scope)}</span>
               {skill.shadowed && <span className="set-chip set-chip-warn">{t("hidden by the project's own")}</span>}
               {skill.problems.length > 0 && (
                 <span className="set-chip set-chip-warn" title={skill.problems.join("; ")}>
@@ -289,14 +296,12 @@ export function IntegrationsSettings() {
             >
               <input aria-label={t("Skill folder name")} autoFocus className="set-input" onChange={(e) => setNewSkill({ ...newSkill, name: e.target.value })} placeholder={t("skill-name")} value={newSkill.name} />
               <Select
-                choices={[
-                  { value: "project", label: t("This project") },
-                  { value: "user", label: t("Every project") },
-                ]}
+                choices={(["project", "user", "thingmaker"] as const).map((scope) => ({ value: scope, label: scopeChip(scope) }))}
                 label={t("Where the skill lives")}
                 onChange={(scope) => setNewSkill({ ...newSkill, scope: scope as SkillScope })}
                 value={newSkill.scope}
               />
+              {newSkill.scope === "thingmaker" && <span className="set-item-note">{t("Available to every agent through ThingMaker's selector")}</span>}
               <button className="set-button" disabled={!newSkill.name.trim() || (newSkill.scope === "project" && !workspaceId)} type="submit">
                 {t("Create")}
               </button>
