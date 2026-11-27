@@ -119,20 +119,8 @@ export function App() {
   }, [bootstrap]);
 
   // Colour scheme lives on <html> so every CSS variable in :root switches at once.
-  // "system" follows the OS and keeps following it while chosen.
   useEffect(() => {
-    const root = document.documentElement;
-    if (theme !== "system") {
-      root.dataset.theme = theme;
-      return;
-    }
-    const media = window.matchMedia("(prefers-color-scheme: light)");
-    const apply = () => {
-      root.dataset.theme = media.matches ? "light" : "dark";
-    };
-    apply();
-    media.addEventListener("change", apply);
-    return () => media.removeEventListener("change", apply);
+    document.documentElement.dataset.theme = theme;
   }, [theme]);
 
   const toggleSidebar = useStore((s) => s.toggleSidebar);

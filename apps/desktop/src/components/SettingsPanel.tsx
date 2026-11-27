@@ -185,10 +185,10 @@ function GeneralTab({ settings, update }: TabProps) {
       </SettingGroup>
 
       <SettingGroup title={t("Appearance")}>
-        <SettingRow hint={t("The light theme uses soft greys, not pure white")} name={t("Theme")}>
+        <SettingRow hint={t("Gray is a soft grey; Light is brighter, near white")} name={t("Theme")}>
           <Segmented
             choices={[
-              { value: "system", label: t("System") },
+              { value: "gray", label: t("Gray") },
               { value: "light", label: t("Light") },
               { value: "dark", label: t("Dark") },
             ]}
