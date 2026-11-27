@@ -1,5 +1,11 @@
 /** Spanish for the settings strings, keyed by their English text. */
 export const settings: Record<string, string> = {
+  "Appearance": "Apariencia",
+  "Theme": "Tema",
+  "The light theme uses soft greys, not pure white": "El tema claro usa grises suaves, no blanco puro",
+  "System": "Sistema",
+  "Light": "Claro",
+  "Dark": "Oscuro",
   "Reply suggestion provider": "Proveedor para sugerir respuestas",
   "Loading models…": "Cargando modelos…",
   "Models unavailable: {problem}": "Modelos no disponibles: {problem}",

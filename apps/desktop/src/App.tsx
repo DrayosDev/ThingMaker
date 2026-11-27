@@ -104,6 +104,7 @@ export function App() {
   const view = useStore((s) => s.view);
   const announcement = useStore((s) => s.announcement);
   const reducedMotion = useStore((s) => s.uiPrefs.reducedMotion);
+  const theme = useStore((s) => s.uiPrefs.theme ?? "dark");
   const sidebarCollapsed = useStore((s) => s.sidebarCollapsed);
   const setView = useStore((s) => s.setView);
   // A quick chat's session gets the whole width: no side pane.
@@ -116,6 +117,23 @@ export function App() {
   useEffect(() => {
     void bootstrap();
   }, [bootstrap]);
+
+  // Colour scheme lives on <html> so every CSS variable in :root switches at once.
+  // "system" follows the OS and keeps following it while chosen.
+  useEffect(() => {
+    const root = document.documentElement;
+    if (theme !== "system") {
+      root.dataset.theme = theme;
+      return;
+    }
+    const media = window.matchMedia("(prefers-color-scheme: light)");
+    const apply = () => {
+      root.dataset.theme = media.matches ? "light" : "dark";
+    };
+    apply();
+    media.addEventListener("change", apply);
+    return () => media.removeEventListener("change", apply);
+  }, [theme]);
 
   const toggleSidebar = useStore((s) => s.toggleSidebar);
   useKeyboardShortcuts();

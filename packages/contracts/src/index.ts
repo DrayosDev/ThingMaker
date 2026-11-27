@@ -1665,6 +1665,9 @@ export type UiPrefs = {
   updateReminder?: boolean;
   /** Save a private, readable context archive on a leader change. Absent means on. */
   autoContinuity?: boolean;
+  /** Colour scheme: the original dark, a light grey theme, or whatever the OS asks for.
+   *  Absent on older saves: dark, so the look never changes under anyone. */
+  theme?: "dark" | "light" | "system";
 };
 
 /**

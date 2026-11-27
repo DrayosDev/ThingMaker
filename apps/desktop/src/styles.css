@@ -30,6 +30,30 @@
   --traffic-lights: 84px;
 }
 
+/* Light theme: soft greys rather than pure white, the same neon-orange accent,
+   and darker status colours for contrast on a light background. The dark :root
+   above stays the default and the pre-JS fallback. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #d9d9db;
+  --sidebar: #cfcfd2;
+  --panel: #e7e7ea;
+  --panel-2: #eeeef0;
+  --panel-3: #f4f4f6;
+  --border: rgba(0, 0, 0, 0.12);
+  --border-strong: rgba(0, 0, 0, 0.22);
+  --text: #1b1b1d;
+  --text-2: #3b3b40;
+  --muted: #6a6a70;
+  --accent: #e2560f;
+  --accent-soft: rgba(226, 86, 15, 0.14);
+  --focus: #2f6fd6;
+  --warn: #9a6a00;
+  --error: #c23b3b;
+  --ok: #2f8f55;
+  --info: #2f6fd6;
+}
+
 :root[data-platform="windows"] {
   --traffic-lights: 16px;
 }
