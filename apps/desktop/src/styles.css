@@ -54,6 +54,21 @@
   --info: #2f6fd6;
 }
 
+/* Light-theme fixes for surfaces whose text or strokes were hard-coded light
+   for a dark background. Each remaps to a darkened colour so it stays legible. */
+:root[data-theme="light"] .banner-error { color: var(--error); }
+:root[data-theme="light"] .banner-attention { color: var(--warn); }
+:root[data-theme="light"] .task-status-in_progress { color: var(--info); }
+:root[data-theme="light"] .local-fit-fits { color: var(--ok); }
+:root[data-theme="light"] .local-fit-tight { color: var(--warn); }
+:root[data-theme="light"] .local-fit-too_big { color: var(--error); }
+:root[data-theme="light"] .provider-tag.provider-claude { color: #b4461e; }
+:root[data-theme="light"] .provider-tag.provider-codex { color: #2f5fbf; }
+:root[data-theme="light"] .provider-tag.provider-gemini { color: #2f8f55; }
+:root[data-theme="light"] .provider-tag.provider-local { color: #2e7d4f; }
+:root[data-theme="light"] .chart-wires path { stroke: rgba(0, 0, 0, 0.28); }
+:root[data-theme="light"] .set-time { color-scheme: light; }
+
 :root[data-platform="windows"] {
   --traffic-lights: 16px;
 }
